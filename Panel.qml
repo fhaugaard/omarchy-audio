@@ -508,6 +508,7 @@ Panel {
   }
 
   property var customRenames: ({})
+  readonly property string renameBin: Qt.resolvedUrl("bin/omarchy-audio-rename").toString().replace(/^file:\/\//, "")
 
   function loadCustomRenames(content) {
     try {
@@ -1191,7 +1192,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         updated[targetNode] = nextName
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "set", targetNode, nextName, "--no-restart"])
       }
     }
 
@@ -1202,7 +1203,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         delete updated[targetNode]
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "reset", targetNode, "--no-restart"])
       }
     }
 
@@ -1480,7 +1481,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         updated[targetNode] = nextName
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "set", targetNode, nextName, "--no-restart"])
       }
     }
 
@@ -1491,7 +1492,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         delete updated[targetNode]
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "reset", targetNode, "--no-restart"])
       }
     }
 
