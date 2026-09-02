@@ -507,12 +507,22 @@ Panel {
     sinkAvailabilityLoaded = true
   }
 
+  property var customRenames: ({})
+
+  function loadCustomRenames(content) {
+    try {
+      root.customRenames = JSON.parse(String(content || "{}")) || ({})
+    } catch (e) {
+      root.customRenames = ({})
+    }
+  }
+
   function friendlyDeviceLabel(text) {
     return Model.friendlyDeviceLabel(text)
   }
 
   function nodeLabel(node) {
-    return Model.nodeLabel(node)
+    return Model.nodeLabel(node, customRenames)
   }
 
   function nodeProps(node) {
@@ -611,6 +621,16 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.volumeSinkName = String(text).trim()
     }
+  }
+
+  FileView {
+    id: renamesFile
+    path: Quickshell.env("HOME") + "/.config/omarchy/audio-renames.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.loadCustomRenames(text())
+    onLoadFailed: root.customRenames = ({})
   }
 
   Timer {
@@ -1167,18 +1187,22 @@ Panel {
       var nextName = sinkRow.editBuffer.trim()
       var targetNode = sinkRow.node ? String(sinkRow.node.name || "") : ""
       sinkRow.isEditing = false
-      root.close()
       if (nextName && targetNode) {
-        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName])
+        var updated = Object.assign({}, root.customRenames)
+        updated[targetNode] = nextName
+        root.customRenames = updated
+        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
       }
     }
 
     function resetEdit() {
       var targetNode = sinkRow.node ? String(sinkRow.node.name || "") : ""
       sinkRow.isEditing = false
-      root.close()
       if (targetNode) {
-        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode])
+        var updated = Object.assign({}, root.customRenames)
+        delete updated[targetNode]
+        root.customRenames = updated
+        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
       }
     }
 
@@ -1452,18 +1476,22 @@ Panel {
       var nextName = sourceRow.editBuffer.trim()
       var targetNode = sourceRow.node ? String(sourceRow.node.name || "") : ""
       sourceRow.isEditing = false
-      root.close()
       if (nextName && targetNode) {
-        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName])
+        var updated = Object.assign({}, root.customRenames)
+        updated[targetNode] = nextName
+        root.customRenames = updated
+        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
       }
     }
 
     function resetEdit() {
       var targetNode = sourceRow.node ? String(sourceRow.node.name || "") : ""
       sourceRow.isEditing = false
-      root.close()
       if (targetNode) {
-        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode])
+        var updated = Object.assign({}, root.customRenames)
+        delete updated[targetNode]
+        root.customRenames = updated
+        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
       }
     }
 
