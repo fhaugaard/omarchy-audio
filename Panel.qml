@@ -1201,44 +1201,76 @@ Panel {
         width: parent.width
         spacing: Style.space(8)
 
-        Text {
-          id: sinkGlyphText
-          textFormat: Text.PlainText
-          text: root.sinkGlyph(sinkRow.node)
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.title
-          width: Style.space(22)
-          horizontalAlignment: Text.AlignHCenter
+        Item {
+          id: sinkSelectArea
+          width: parent.width - sinkEditIcon.width - Style.space(8)
+          height: Math.max(sinkGlyphText.implicitHeight, sinkLabelText.implicitHeight)
           anchors.verticalCenter: parent.verticalCenter
-          opacity: sinkRow.nodeMuted ? 0.5 : 1.0
-        }
 
-        Text {
-          textFormat: Text.PlainText
-          text: root.nodeLabel(sinkRow.node)
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: sinkRow.isActive
-          elide: Text.ElideRight
-          width: parent.width - sinkGlyphText.width - sinkPct.width - sinkEditIcon.width - Style.space(24)
-          anchors.verticalCenter: parent.verticalCenter
-          opacity: sinkRow.nodeMuted ? 0.5 : 1.0
-        }
+          Row {
+            anchors.fill: parent
+            spacing: Style.space(8)
 
-        Text {
-          id: sinkPct
-          textFormat: Text.PlainText
-          text: Math.round(sinkRow.nodeVolume * 100) + "%"
-          color: Qt.darker(root.bar.foreground, 1.5)
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          width: Style.space(36)
-          horizontalAlignment: Text.AlignRight
-          anchors.verticalCenter: parent.verticalCenter
-          opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            Text {
+              id: sinkGlyphText
+              textFormat: Text.PlainText
+              text: root.sinkGlyph(sinkRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              width: Style.space(22)
+              horizontalAlignment: Text.AlignHCenter
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: sinkLabelText
+              textFormat: Text.PlainText
+              text: root.nodeLabel(sinkRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: sinkRow.isActive
+              elide: Text.ElideRight
+              width: parent.width - sinkGlyphText.width - sinkPct.width - Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: sinkPct
+              textFormat: Text.PlainText
+              text: Math.round(sinkRow.nodeVolume * 100) + "%"
+              color: Qt.darker(root.bar.foreground, 1.5)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              width: Style.space(36)
+              horizontalAlignment: Text.AlignRight
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "output"
+              root.selectedIndex = sinkRow.rowIndex
+            }
+            onClicked: function(mouse) {
+              if (mouse.button === Qt.RightButton) {
+                sinkRow.startEditing()
+              } else {
+                root.setDefaultSink(sinkRow.node)
+              }
+            }
+          }
         }
 
         Text {
@@ -1251,7 +1283,7 @@ Panel {
           width: Style.space(20)
           horizontalAlignment: Text.AlignHCenter
           anchors.verticalCenter: parent.verticalCenter
-          opacity: (sinkRow.hasCursor || rowMouse.containsMouse || editArea.containsMouse) ? 1.0 : 0.3
+          opacity: (sinkRow.hasCursor || editArea.containsMouse) ? 1.0 : 0.3
 
           MouseArea {
             id: editArea
@@ -1259,6 +1291,11 @@ Panel {
             anchors.margins: -Style.space(4)
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "output"
+              root.selectedIndex = sinkRow.rowIndex
+            }
             onClicked: sinkRow.startEditing()
           }
         }
@@ -1286,31 +1323,21 @@ Panel {
     }
 
     MouseArea {
-      id: rowMouse
       visible: !sinkRow.isEditing
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      height: root.expandOutputLevels ? (sinkInner.height + Style.spacing.md) : parent.height
+      anchors.fill: parent
       hoverEnabled: true
-      acceptedButtons: Qt.LeftButton | Qt.RightButton
-      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.NoButton
+      propagateComposedEvents: true
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "output"
         root.selectedIndex = sinkRow.rowIndex
       }
-      onClicked: function(mouse) {
-        if (mouse.button === Qt.RightButton) {
-          sinkRow.startEditing()
-        } else {
-          root.setDefaultSink(sinkRow.node)
-        }
-      }
     }
 
     Row {
       id: sinkEditRow
+      z: 10
       visible: sinkRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
@@ -1459,44 +1486,76 @@ Panel {
         width: parent.width
         spacing: Style.space(8)
 
-        Text {
-          id: srcGlyphText
-          textFormat: Text.PlainText
-          text: root.sourceGlyph(sourceRow.node)
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.title
-          width: Style.space(22)
-          horizontalAlignment: Text.AlignHCenter
+        Item {
+          id: srcSelectArea
+          width: parent.width - srcEditIcon.width - Style.space(8)
+          height: Math.max(srcGlyphText.implicitHeight, srcLabelText.implicitHeight)
           anchors.verticalCenter: parent.verticalCenter
-          opacity: sourceRow.nodeMuted ? 0.5 : 1.0
-        }
 
-        Text {
-          textFormat: Text.PlainText
-          text: root.nodeLabel(sourceRow.node)
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: sourceRow.isActive
-          elide: Text.ElideRight
-          width: parent.width - srcGlyphText.width - srcPct.width - srcEditIcon.width - Style.space(24)
-          anchors.verticalCenter: parent.verticalCenter
-          opacity: sourceRow.nodeMuted ? 0.5 : 1.0
-        }
+          Row {
+            anchors.fill: parent
+            spacing: Style.space(8)
 
-        Text {
-          id: srcPct
-          textFormat: Text.PlainText
-          text: Math.round(sourceRow.nodeVolume * 100) + "%"
-          color: Qt.darker(root.bar.foreground, 1.5)
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          width: Style.space(36)
-          horizontalAlignment: Text.AlignRight
-          anchors.verticalCenter: parent.verticalCenter
-          opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            Text {
+              id: srcGlyphText
+              textFormat: Text.PlainText
+              text: root.sourceGlyph(sourceRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              width: Style.space(22)
+              horizontalAlignment: Text.AlignHCenter
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: srcLabelText
+              textFormat: Text.PlainText
+              text: root.nodeLabel(sourceRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: sourceRow.isActive
+              elide: Text.ElideRight
+              width: parent.width - srcGlyphText.width - srcPct.width - Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: srcPct
+              textFormat: Text.PlainText
+              text: Math.round(sourceRow.nodeVolume * 100) + "%"
+              color: Qt.darker(root.bar.foreground, 1.5)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              width: Style.space(36)
+              horizontalAlignment: Text.AlignRight
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "input"
+              root.selectedIndex = sourceRow.rowIndex
+            }
+            onClicked: function(mouse) {
+              if (mouse.button === Qt.RightButton) {
+                sourceRow.startEditing()
+              } else {
+                root.setDefaultSource(sourceRow.node)
+              }
+            }
+          }
         }
 
         Text {
@@ -1509,7 +1568,7 @@ Panel {
           width: Style.space(20)
           horizontalAlignment: Text.AlignHCenter
           anchors.verticalCenter: parent.verticalCenter
-          opacity: (sourceRow.hasCursor || srcRowMouse.containsMouse || srcEditArea.containsMouse) ? 1.0 : 0.3
+          opacity: (sourceRow.hasCursor || srcEditArea.containsMouse) ? 1.0 : 0.3
 
           MouseArea {
             id: srcEditArea
@@ -1517,6 +1576,11 @@ Panel {
             anchors.margins: -Style.space(4)
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "input"
+              root.selectedIndex = sourceRow.rowIndex
+            }
             onClicked: sourceRow.startEditing()
           }
         }
@@ -1544,31 +1608,21 @@ Panel {
     }
 
     MouseArea {
-      id: srcRowMouse
       visible: !sourceRow.isEditing
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      height: root.expandInputLevels ? (sourceInner.height + Style.spacing.md) : parent.height
+      anchors.fill: parent
       hoverEnabled: true
-      acceptedButtons: Qt.LeftButton | Qt.RightButton
-      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.NoButton
+      propagateComposedEvents: true
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "input"
         root.selectedIndex = sourceRow.rowIndex
       }
-      onClicked: function(mouse) {
-        if (mouse.button === Qt.RightButton) {
-          sourceRow.startEditing()
-        } else {
-          root.setDefaultSource(sourceRow.node)
-        }
-      }
     }
 
     Row {
       id: srcEditRow
+      z: 10
       visible: sourceRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
