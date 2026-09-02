@@ -1,12 +1,8 @@
 # Omarchy Audio (`skye.audio`)
 
-[![Omarchy Plugin](https://img.shields.io/badge/Omarchy-Plugin-4a86e8?style=flat-square)](https://omarchy.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-[![PipeWire](https://img.shields.io/badge/Audio-PipeWire%20%2F%20WirePlumber-blueviolet?style=flat-square)](https://pipewire.org/)
+An enhanced audio mixer and sound control panel bar widget for the [Omarchy](https://omarchy.org/) desktop shell (built on Quickshell and PipeWire / WirePlumber).
 
-An enhanced sound control panel and audio mixer for the [Omarchy](https://omarchy.org/) desktop shell. Built on **Quickshell**, **PipeWire**, and **WirePlumber**.
-
-This plugin elevates the stock `omarchy.audio` experience with **instant inline device renaming**, **independent per-device level controls**, **per-application stream mixing**, **MPRIS media correlation**, **bundled CLI utility**, and **full keyboard navigation**.
+This plugin extends Omarchy's native `omarchy.audio` bar widget with **direct inline audio device renaming**, **independent per-device volume levels**, **Pro Audio profile management**, **multi-device output routing**, seamless device selection, per-application stream volume management, and keyboard navigation.
 
 ---
 
@@ -29,6 +25,10 @@ This plugin elevates the stock `omarchy.audio` experience with **instant inline 
 - **Automatic Jack Availability**: Dynamically detects and filters disconnected or unavailable audio endpoints.
 - **Adaptive Device Glyphs**: Contextual icons for headphones (`󰋋`), Bluetooth (`󰂯`), HDMI/DisplayPort (`󰍹`), webcams (`󰄀`), and speakers (`󰓃`).
 - **DSP & Tuning Sink Awareness**: Correctly resolves physical devices through virtual speaker tunings, EasyEffects, and DSP sinks.
+
+### 🔀 Multi-Device Output Routing & Simultaneous Playback
+- **Per-Application Routing**: Route individual applications (Discord, Spotify, games, web browsers) to any connected output device via the expandable **󰌹 Route** matrix.
+- **Simultaneous Output**: One-click toggle to play audio through all connected outputs simultaneously via native `module-combine-sink`.
 
 ### 🎛️ Per-Application Stream Mixer
 - **Application Level Sliders**: Control volume individually for active apps (browsers, music players, games, Discord).
@@ -71,7 +71,7 @@ omarchy plugin add https://github.com/fhaugaard/omarchy-audio.git --enable --yes
 
 Everything in the UI and sound mixer works immediately out of the box with zero extra configuration.
 
-*(Optional)* To make the bundled `omarchy-audio-rename` CLI available globally in your terminal `$PATH`:
+*(Optional)* To make the bundled CLI utilities available globally in your terminal `$PATH`:
 
 ```bash
 ~/.config/omarchy/plugins/skye.audio/setup.sh --yes
@@ -115,9 +115,10 @@ Everything in the UI and sound mixer works immediately out of the box with zero 
 
 ---
 
-## 💻 CLI Utility (`omarchy-audio-rename`)
+## 💻 CLI Utilities
 
-The bundled CLI utility provides terminal management of audio device aliases:
+### `omarchy-audio-rename`
+Terminal management of audio device aliases:
 
 ```bash
 # List all audio devices and their current aliases
@@ -136,6 +137,20 @@ omarchy-audio-rename reset-all
 omarchy-audio-rename gui
 ```
 
+### `omarchy-audio-routing`
+Pro Audio, simultaneous playback, and stream routing control:
+
+```bash
+# List sound cards and profile states as JSON
+omarchy-audio-routing list-cards
+
+# Toggle simultaneous playback on all outputs
+omarchy-audio-routing toggle-simultaneous
+
+# Move an application stream to a specific sink
+omarchy-audio-routing route-stream-to-sink Spotify alsa_output.pci-0000_2f_00.4.analog-stereo
+```
+
 ---
 
 ## 🗂️ Project Structure
@@ -143,12 +158,13 @@ omarchy-audio-rename gui
 ```
 omarchy-audio/
 ├── bin/
-│   └── omarchy-audio-rename  # Bundled CLI backend & WirePlumber manager
-├── setup.sh                  # Optional automated helper & CLI symlinker
-├── manifest.json             # Plugin manifest and bar widget registration
-├── Panel.qml                 # Main audio mixer popup, hero header, device list, and streams
-├── Model.js                  # Device glyph resolution, label formatting, and audio models
-└── README.md                 # Documentation
+│   ├── omarchy-audio-rename   # Bundled CLI backend & WirePlumber manager
+│   └── omarchy-audio-routing  # Simultaneous routing & stream movement engine
+├── setup.sh                   # Automated helper & CLI symlinker
+├── manifest.json              # Plugin manifest and bar widget registration
+├── Panel.qml                  # Main audio mixer popup, hero header, device list, and streams
+├── Model.js                   # Device glyph resolution, label formatting, and audio models
+└── README.md                  # Documentation
 ```
 
 ---

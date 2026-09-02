@@ -47,6 +47,46 @@ function parseSinkAvailability(raw) {
   return next
 }
 
+function parseCardProfiles(raw) {
+  if (!raw) return []
+  try {
+    var data = typeof raw === "string" ? JSON.parse(raw) : raw
+    return Array.isArray(data) ? data : []
+  } catch (e) {
+    return []
+  }
+}
+
+function parseStreamLinks(raw) {
+  if (!raw) return {}
+  try {
+    var data = typeof raw === "string" ? JSON.parse(raw) : raw
+    return (data && typeof data === "object") ? data : {}
+  } catch (e) {
+    return {}
+  }
+}
+
+function parseRenames(raw) {
+  if (!raw) return {}
+  try {
+    var data = typeof raw === "string" ? JSON.parse(raw) : raw
+    if (Array.isArray(data)) {
+      var map = {}
+      for (var i = 0; i < data.length; i++) {
+        var item = data[i]
+        if (item && item.node_name && item.alias) {
+          map[item.node_name] = item.alias
+        }
+      }
+      return map
+    }
+    return (data && typeof data === "object") ? data : {}
+  } catch (e) {
+    return {}
+  }
+}
+
 function friendlyDeviceLabel(text) {
   var label = String(text || "").trim()
   label = label.replace(/^sof-soundwire\s+/i, "")
@@ -61,11 +101,23 @@ function nodeProps(node) {
   return node && node.ready && node.properties ? node.properties : {}
 }
 
+function isProAudioNode(node) {
+  if (!node) return false
+  var p = nodeProps(node)
+  var name = String(node.name || p["node.name"] || "")
+  var desc = String(node.description || p["node.description"] || "")
+  var prof = String(p["device.profile.name"] || p["device.profile.description"] || "")
+  return name.indexOf("pro-output") !== -1
+    || name.indexOf("pro-input") !== -1
+    || desc.indexOf("Pro Audio") !== -1
+    || prof.indexOf("pro-audio") !== -1
+}
+
 function nodeLabel(node, customRenames) {
   if (!node) return "Unknown"
   var name = node.name ? String(node.name) : ""
-  if (customRenames && name && customRenames[name]) {
-    return friendlyDeviceLabel(customRenames[name])
+  if (customRenames && name && customRenames[name] && String(customRenames[name]).trim()) {
+    return friendlyDeviceLabel(String(customRenames[name]).trim())
   }
   var p = nodeProps(node)
   var nickname = friendlyDeviceLabel(node.nickname || node.nick || p["node.nick"] || p["device.profile.description"] || "")
@@ -73,8 +125,12 @@ function nodeLabel(node, customRenames) {
   return friendlyDeviceLabel(node.description || p["node.description"] || node.name || "Unknown")
 }
 
-function isHeadphones(node) {
+function isHeadphones(node, customRenames) {
   if (!node) return false
+  var label = nodeLabel(node, customRenames).toLowerCase()
+  if (label.indexOf("speaker") !== -1) return false
+  if (label.indexOf("headphone") !== -1 || label.indexOf("headset") !== -1 || label.indexOf("earbud") !== -1) return true
+
   var p = nodeProps(node)
   var blob = String([
     node.name, node.description, node.nickname,
@@ -90,9 +146,15 @@ function isHeadphones(node) {
     || blob.indexOf("airpod") !== -1
 }
 
-function sinkGlyph(node) {
+function sinkGlyph(node, customRenames) {
   if (!node) return "󰓃"
-  if (isHeadphones(node)) return "󰋋"
+  var label = nodeLabel(node, customRenames).toLowerCase()
+  if (label.indexOf("optical") !== -1 || label.indexOf("spdif") !== -1 || label.indexOf("iec958") !== -1) return "󰡁"
+  if (label.indexOf("speaker") !== -1) return "󰓃"
+  if (label.indexOf("headphone") !== -1 || label.indexOf("headset") !== -1) return "󰋋"
+  if (label.indexOf("tv") !== -1 || label.indexOf("monitor") !== -1 || label.indexOf("display") !== -1 || label.indexOf("hdmi") !== -1) return "󰍹"
+  
+  if (isHeadphones(node, customRenames)) return "󰋋"
   var p = nodeProps(node)
   var blob = String([
     node.name, node.description, node.nickname,
@@ -104,8 +166,12 @@ function sinkGlyph(node) {
   return "󰓃"
 }
 
-function sourceGlyph(node) {
+function sourceGlyph(node, customRenames) {
   if (!node) return "󰍬"
+  var label = nodeLabel(node, customRenames).toLowerCase()
+  if (label.indexOf("headphone") !== -1 || label.indexOf("headset") !== -1) return "󰋋"
+  if (label.indexOf("webcam") !== -1 || label.indexOf("camera") !== -1) return "󰄀"
+
   var p = nodeProps(node)
   var blob = String([
     node.name, node.description, node.nickname,
@@ -237,6 +303,41 @@ function streamRepresentsPlayer(node, player, players, streams) {
   return streamRepresentsMprisPlayer(streamLabel(node, players, streams), playerLabel)
 }
 
+function streamIsLinkedToSink(streamNode, sinkNode, streamLinks) {
+  if (!streamNode || !sinkNode || !streamLinks) return false
+  var streamName = String(streamNode.name || "")
+  var rawName = String(rawStreamLabel(streamNode) || "")
+  var sinkName = String(sinkNode.name || "")
+  var streamId = String(streamNode.id !== undefined ? streamNode.id : "")
+
+  var matchKeys = [streamId, streamName, rawName]
+  for (var k = 0; k < matchKeys.length; k++) {
+    var key = matchKeys[k]
+    if (!key) continue
+    var list = streamLinks[key] || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] === sinkName || list[i].indexOf(sinkName) !== -1 || sinkName.indexOf(list[i]) !== -1)
+        return true
+    }
+  }
+
+  for (var mapKey in streamLinks) {
+    var keyLower = mapKey.toLowerCase()
+    if ((streamName && keyLower.indexOf(streamName.toLowerCase()) !== -1)
+        || (rawName && keyLower.indexOf(rawName.toLowerCase()) !== -1)
+        || (streamName && streamName.toLowerCase().indexOf(keyLower) !== -1)
+        || (rawName && rawName.toLowerCase().indexOf(keyLower) !== -1)) {
+      var targets = streamLinks[mapKey] || []
+      for (var j = 0; j < targets.length; j++) {
+        if (targets[j] === sinkName || targets[j].indexOf(sinkName) !== -1 || sinkName.indexOf(targets[j]) !== -1)
+          return true
+      }
+    }
+  }
+
+  return false
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     isPlaybackStream: isPlaybackStream,
@@ -244,8 +345,12 @@ if (typeof module !== "undefined") {
     listSnapshot: listSnapshot,
     outputVolumeName: outputVolumeName,
     parseSinkAvailability: parseSinkAvailability,
+    parseCardProfiles: parseCardProfiles,
+    parseStreamLinks: parseStreamLinks,
+    parseRenames: parseRenames,
     friendlyDeviceLabel: friendlyDeviceLabel,
     nodeProps: nodeProps,
+    isProAudioNode: isProAudioNode,
     nodeLabel: nodeLabel,
     isHeadphones: isHeadphones,
     sinkGlyph: sinkGlyph,
@@ -261,6 +366,7 @@ if (typeof module !== "undefined") {
     matchingMprisStreamLabel: matchingMprisStreamLabel,
     unmatchedMprisStreamLabel: unmatchedMprisStreamLabel,
     streamLabel: streamLabel,
-    streamRepresentsPlayer: streamRepresentsPlayer
+    streamRepresentsPlayer: streamRepresentsPlayer,
+    streamIsLinkedToSink: streamIsLinkedToSink
   }
 }

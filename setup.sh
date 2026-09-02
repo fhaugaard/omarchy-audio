@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # omarchy-audio setup script
-# Configures the skye.audio plugin, symlinks the CLI renamer, and reloads the shell.
+# Configures the skye.audio plugin, symlinks the CLI renamer and routing utilities, and reloads the shell.
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ while (( $# > 0 )); do
       ;;
     -h|--help)
       echo "Usage: ./setup.sh [--yes]"
-      echo "Set up Omarchy Audio plugin and CLI renamer utility."
+      echo "Set up Omarchy Audio plugin, CLI renamer, and routing utilities."
       exit 0
       ;;
     *)
@@ -31,7 +31,7 @@ echo "========================================================"
 # 1. Ensure directories exist
 mkdir -p "$HOME/.local/bin" "$HOME/.config/omarchy" "$HOME/.config/wireplumber/wireplumber.conf.d"
 
-# 2. Make bin/omarchy-audio-rename executable and link to ~/.local/bin
+# 2. Make bin/ scripts executable and link to ~/.local/bin
 RENAME_SRC="$SCRIPT_DIR/bin/omarchy-audio-rename"
 if [[ -f "$RENAME_SRC" ]]; then
   chmod +x "$RENAME_SRC"
@@ -39,6 +39,15 @@ if [[ -f "$RENAME_SRC" ]]; then
   echo "✓ Linked omarchy-audio-rename CLI into $HOME/.local/bin/"
 else
   echo "⚠️  $RENAME_SRC not found, skipping CLI symlink."
+fi
+
+ROUTING_SRC="$SCRIPT_DIR/bin/omarchy-audio-routing"
+if [[ -f "$ROUTING_SRC" ]]; then
+  chmod +x "$ROUTING_SRC"
+  ln -sfn "$ROUTING_SRC" "$HOME/.local/bin/omarchy-audio-routing"
+  echo "✓ Linked omarchy-audio-routing CLI into $HOME/.local/bin/"
+else
+  echo "⚠️  $ROUTING_SRC not found, skipping CLI symlink."
 fi
 
 # 3. Initialize audio-renames.json if missing
