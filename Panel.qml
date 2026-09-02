@@ -24,7 +24,11 @@ Panel {
     var list = []
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
-      if (n && n.isSink && !n.isStream) list.push(n)
+      if (n && n.isSink && !n.isStream) {
+        var name = String(n.name || "")
+        if (name.indexOf("output.omarchy_combined") === 0) continue
+        list.push(n)
+      }
     }
     return list
   }
@@ -47,9 +51,8 @@ Panel {
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
       if (!n || !n.isStream || !isPlaybackStream(n)) continue
-      // A tuning's output is a playback stream too, but it is the processing
-      // itself rather than an application, so it does not belong in the list.
       if (String(n.name || "").indexOf("omarchy_speaker_tuning") === 0) continue
+      if (String(n.name || "").indexOf("output.omarchy_combined") === 0) continue
       list.push(n)
     }
     return list
@@ -59,14 +62,10 @@ Panel {
   property bool sinkAvailabilityLoaded: false
   property bool expandOutputLevels: false
   property bool expandInputLevels: false
+  property var soundCards: []
+  property var streamLinks: ({})
+  property var customRenames: ({})
 
-  // Identify true playback streams without reading node.properties here:
-  // PwNode.properties is invalid until the node is bound, and reading it while
-  // capture streams are appearing (for example, when Voxtype starts recording)
-  // can destabilize Quickshell's Pipewire service. Quickshell versions differ
-  // in how `type` is exposed (media.class, enum name, or numeric enum), but
-  // playback streams consistently accept audio input from clients and publish
-  // `isSink: true`; capture streams publish as stream sources.
   function isPlaybackStream(node) {
     return Model.isPlaybackStream(node)
   }
@@ -102,28 +101,11 @@ Panel {
     return list
   }
 
-  // Feed Repeaters with panel-local snapshots instead of the live PipeWire
-  // model. PipeWire can remove nodes while Quickshell is dispatching the
-  // removal signal; rebuilding a Repeater from that signal path has crashed
-  // in Quickshell's PipeWire service. The snapshot timer lets that mutation
-  // settle first, and closed panels keep their repeaters detached entirely.
   property var displayAudioSinks: []
   property var displayAudioSources: []
   property var displayAudioStreams: []
 
-  // A DSP sink -- a speaker tuning, or EasyEffects -- can be the selected output
-  // without being where loudness lives: changing its volume alters the level going
-  // *into* the processing, so the slider would move while the speakers did not,
-  // and on a chain with a limiter it would change the tone as well.
-  //
-  // omarchy-audio-output-sink resolves the *current* default output through any
-  // such sink to the physical one, which is the same definition the volume keys
-  // and the output switcher use. Resolving the default (rather than "whatever a
-  // tuning fronts") is what keeps this correct when headphones or HDMI are
-  // selected while a tuning still exists.
   property string volumeSinkName: ""
-
-  // Carry sub-notch touchpad deltas between wheel events.
   property real wheelAccumulator: 0
 
   readonly property var volumeSink: {
@@ -137,8 +119,6 @@ Panel {
     return sink
   }
 
-  // Re-resolve whenever the selected output changes; the timer below is only a
-  // safety net for the tuning being applied or removed underneath us.
   onSinkChanged: resolveVolumeSink()
 
   function resolveVolumeSink() {
@@ -153,26 +133,11 @@ Panel {
   onRawAudioSinksChanged: if (rawAudioSinks.length > 0) cachedAudioSinks = rawAudioSinks
   onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
 
-  // Single cursor model shared by keyboard and mouse. Sections:
-  //   "output"  — output slider + sink device list
-  //   "input"   — input slider + source device list
-  //   "streams" — per-app playback streams
-  // selectedIndex semantics within a section:
-  //   -1            → on the slider row (h/l adjusts volume, m/Enter mute)
-  //   0..N-1        → on the Nth device/stream row
-  // Visuals derive from hasCursor/current via CursorSurface, never
-  // from containsMouse — that's what keeps the highlight unique across
-  // keyboard + mouse like wifi does.
   property string focusSection: "output"
   property int selectedIndex: -1
   property bool cursorActive: false
 
-  // "header" is a virtual section for the hero output mute toggle; it sits
-  // above the output section so the speaker can be muted from the keyboard.
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
-  // Only channels that actually exist get a vote. A box with no default source
-  // would otherwise report "input unmuted" forever, leaving the hero switch
-  // able to mute but never to unmute.
   readonly property bool hasOutput: !!(volumeSink && volumeSink.audio)
   readonly property bool hasInput: !!(source && source.audio)
   readonly property bool anyAudible: (hasOutput && !outputMuted) || (hasInput && !inputMuted)
@@ -202,11 +167,9 @@ Panel {
   function sectionHasSlider(section) {
     if (section === "output") return true
     if (section === "input") return !!source
-    return false  // stream rows carry their own sliders inline; not a section-level slider
+    return false
   }
 
-  // Order of visible sections, recomputed reactively so dropping a section
-  // (e.g. no input devices) doesn't leave the cursor pointing at it.
   readonly property var visibleSections: {
     var list = []
     if (sectionVisible("output")) list.push("output")
@@ -226,20 +189,18 @@ Panel {
     if (sIdx < 0) { focusSection = sections[0]; selectedIndex = sectionHasSlider(focusSection) ? -1 : 0; return }
 
     var idx = selectedIndex
-    var max = sectionCount(focusSection) - 1  // last device index
+    var max = sectionCount(focusSection) - 1
     var hasSlider = sectionHasSlider(focusSection)
-    var floor = hasSlider ? -1 : 0  // -1 = slider row
+    var floor = hasSlider ? -1 : 0
 
     if (delta > 0) {
       if (idx < max) { selectedIndex = idx + 1; return }
-      // Fall through to next section.
       if (sIdx < sections.length - 1) {
         focusSection = sections[sIdx + 1]
         selectedIndex = sectionHasSlider(focusSection) ? -1 : 0
       }
     } else {
       if (idx > floor) { selectedIndex = idx - 1; return }
-      // Escape upward.
       if (sIdx > 0) {
         focusSection = sections[sIdx - 1]
         var prevMax = sectionCount(focusSection) - 1
@@ -267,29 +228,13 @@ Panel {
     cursorActive = true
   }
 
-  // Adjust the slider associated with the focused section. Output and
-  // input sliders are real volume controls; on stream rows h/l adjusts
-  // that stream's volume (so keyboard parity with the inline slider).
-  // For device rows (selectedIndex >= 0 in output/input) h/l is a no-op
-  // — the cursor is on a discrete row, not on the slider, and silently
-  // moving the global slider would surprise the user.
   function adjustVolume(delta) {
-    if (focusSection === "output") {
-      if (selectedIndex === -1) {
-        setOutputVolume(outputVolume + delta)
-      } else if (selectedIndex >= 0 && selectedIndex < displayAudioSinks.length) {
-        var sk = displayAudioSinks[selectedIndex]
-        if (sk && sk.audio) sk.audio.volume = Math.max(0, Math.min(1, sk.audio.volume + delta))
-      }
+    if (focusSection === "output" && selectedIndex === -1) {
+      setOutputVolume(outputVolume + delta)
       return
     }
-    if (focusSection === "input") {
-      if (selectedIndex === -1) {
-        setInputVolume(inputVolume + delta)
-      } else if (selectedIndex >= 0 && selectedIndex < displayAudioSources.length) {
-        var src = displayAudioSources[selectedIndex]
-        if (src && src.audio) src.audio.volume = Math.max(0, Math.min(1, src.audio.volume + delta))
-      }
+    if (focusSection === "input" && selectedIndex === -1) {
+      setInputVolume(inputVolume + delta)
       return
     }
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
@@ -298,7 +243,6 @@ Panel {
     }
   }
 
-  // Enter/Space: activate whatever the cursor is on.
   function activateCursor() {
     if (focusSection === "header") { toggleAllMuted(); return }
     if (focusSection === "output") {
@@ -321,9 +265,10 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      refreshRoutingState()
       refreshDisplayAudioModels()
       focusSection = "output"
-      selectedIndex = -1  // first keyboard cursor reveal starts on the output slider
+      selectedIndex = -1
       cursorActive = false
       Qt.callLater(resetScroll)
     } else {
@@ -331,10 +276,12 @@ Panel {
     }
   }
 
-  // Clamp / repair the cursor whenever any list refreshes underneath us.
   onAudioSinksChanged: scheduleDisplayAudioModelRefresh()
   onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
-  onAudioStreamsChanged: scheduleDisplayAudioModelRefresh()
+  onAudioStreamsChanged: {
+    scheduleDisplayAudioModelRefresh()
+    if (opened && !streamLinksProc.running) streamLinksProc.running = true
+  }
 
   function listSnapshot(list) {
     return Model.listSnapshot(list)
@@ -360,11 +307,6 @@ Panel {
     displayAudioStreams = []
   }
 
-  // Keep the keyboard-focused row inside the visible viewport of the
-  // ScrollView. Each cursor target (slider rows, SinkRow, SourceRow,
-  // StreamRow) calls this when it gains hasCursor. Without it, j/k can
-  // walk the selection off-screen — wifi uses ListView.positionViewAtIndex
-  // for this; we don't have that affordance with a multi-section Column.
   function resetScroll() {
     if (!scrollArea) return
     var flick = scrollArea.contentItem
@@ -394,9 +336,6 @@ Panel {
   function clampCursor() {
     var sections = visibleSections
     if (!sections || !sections.length) return
-    // "header" is virtual and never appears in visibleSections, so it has to
-    // be let through: muting republishes the PipeWire snapshot, and clamping
-    // would knock the cursor off the hero switch on every toggle.
     if (focusSection === "header") return
     if (sections.indexOf(focusSection) < 0) {
       focusSection = visibleSections[0]
@@ -411,8 +350,6 @@ Panel {
   }
 
   function outputIcon(volume) {
-    // Match the old Waybar pulseaudio glyph set. The Material Design speaker
-    // icons render visually smaller in JetBrainsMono Nerd Font.
     if (!sink || !sink.audio) return ""
     if (isHeadphones(sink)) return "󰋋"
     if (outputMuted) return ""
@@ -428,9 +365,6 @@ Panel {
     return inputMuted ? "󰍭" : "󰍬"
   }
 
-  // Playful mood-name for a given output volume. Mirrors the brightness
-  // panel's brightnessName ladder; bands are wide enough that small
-  // tweaks don't rename the room you're in.
   function outputVolumeName(volume, muted) {
     return Model.outputVolumeName(volume, muted)
   }
@@ -463,9 +397,6 @@ Panel {
     if (source && source.audio) source.audio.muted = !source.audio.muted
   }
 
-  // The hero switch is the whole panel's on/off, so it carries both channels
-  // at once. It reads as on while anything is still audible, which keeps
-  // muting a single channel from the row below flipping the master switch.
   function toggleAllMuted() {
     var mute = anyAudible
     if (hasOutput) volumeSink.audio.muted = mute
@@ -507,9 +438,6 @@ Panel {
     sinkAvailabilityLoaded = true
   }
 
-  property var customRenames: ({})
-  readonly property string renameBin: Qt.resolvedUrl("bin/omarchy-audio-rename").toString().replace(/^file:\/\//, "")
-
   function loadCustomRenames(content) {
     try {
       root.customRenames = JSON.parse(String(content || "{}")) || ({})
@@ -523,7 +451,7 @@ Panel {
   }
 
   function nodeLabel(node) {
-    return Model.nodeLabel(node, customRenames)
+    return Model.nodeLabel(node, root.customRenames)
   }
 
   function nodeProps(node) {
@@ -531,15 +459,15 @@ Panel {
   }
 
   function isHeadphones(node) {
-    return Model.isHeadphones(node)
+    return Model.isHeadphones(node, root.customRenames)
   }
 
   function sinkGlyph(node) {
-    return Model.sinkGlyph(node)
+    return Model.sinkGlyph(node, root.customRenames)
   }
 
   function sourceGlyph(node) {
-    return Model.sourceGlyph(node)
+    return Model.sourceGlyph(node, root.customRenames)
   }
 
   function friendlyStreamLabel(label) {
@@ -579,9 +507,6 @@ Panel {
   }
 
   function unmatchedMprisStreamLabel(label) {
-    // Spotify exposes its PipeWire stream as "audio-src". For generic stream
-    // names, use the one MPRIS player not already represented by another audio
-    // stream (e.g. Chromium, or ALSA apps like cliamp).
     return Model.unmatchedMprisStreamLabel(label, mprisPlayers, displayAudioStreams)
   }
 
@@ -591,6 +516,32 @@ Panel {
 
   function streamRepresentsPlayer(node, player) {
     return Model.streamRepresentsPlayer(node, player, mprisPlayers, displayAudioStreams)
+  }
+
+  function refreshRoutingState() {
+    if (!cardsProc.running) cardsProc.running = true
+    if (!streamLinksProc.running) streamLinksProc.running = true
+    if (renamesFile) renamesFile.reload()
+  }
+
+  function toggleSimultaneous() {
+    Quickshell.execDetached(["omarchy-audio-routing", "toggle-simultaneous"])
+    Qt.callLater(function() {
+      refreshRoutingState()
+      scheduleDisplayAudioModelRefresh()
+    })
+  }
+
+  function toggleStreamRoute(streamNode, sinkNode) {
+    if (!streamNode || !sinkNode) return
+    var streamId = String(streamNode.id !== undefined ? streamNode.id : "")
+    var streamName = String(streamNode.name || Model.rawStreamLabel(streamNode) || "")
+    var sinkName = String(sinkNode.name || "")
+    var sinkId = String(sinkNode.id !== undefined ? sinkNode.id : "")
+    Quickshell.execDetached(["omarchy-audio-routing", "route-stream-to-sink", streamId, sinkName, streamName, sinkId])
+    Qt.callLater(function() {
+      if (!streamLinksProc.running) streamLinksProc.running = true
+    })
   }
 
   implicitWidth: button.implicitWidth
@@ -624,6 +575,24 @@ Panel {
     }
   }
 
+  Process {
+    id: cardsProc
+    command: ["omarchy-audio-routing", "list-cards"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.soundCards = Model.parseCardProfiles(text)
+    }
+  }
+
+  Process {
+    id: streamLinksProc
+    command: ["omarchy-audio-routing", "list-streams-and-links"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.streamLinks = Model.parseStreamLinks(text)
+    }
+  }
+
   FileView {
     id: renamesFile
     path: Quickshell.env("HOME") + "/.config/omarchy/audio-renames.json"
@@ -635,16 +604,16 @@ Panel {
   }
 
   Timer {
-    interval: 5000
+    interval: 3000
     running: root.opened
     repeat: true
     triggeredOnStart: true
-    onTriggered: if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
+    onTriggered: {
+      if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
+      root.refreshRoutingState()
+    }
   }
 
-  // Runs whether or not the panel is open: the bar shows and scrolls the output
-  // volume too, so an unresolved sink there would read and change the virtual
-  // tuning sink instead of the speakers.
   Timer {
     interval: 15000
     running: true
@@ -702,8 +671,6 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        // 'm' mutes whatever the cursor is on: focused section's master slider
-        // (if selectedIndex === -1), the focused device, or the focused stream.
         if (t === "m" || t === "M") {
           if (!root.cursorActive) return
           if (root.focusSection === "streams" && root.selectedIndex >= 0
@@ -711,19 +678,9 @@ Panel {
             var s = root.displayAudioStreams[root.selectedIndex]
             if (s && s.audio) s.audio.muted = !s.audio.muted
           } else if (root.focusSection === "input") {
-            if (root.selectedIndex === -1) {
-              root.toggleInputMute()
-            } else if (root.selectedIndex >= 0 && root.selectedIndex < root.displayAudioSources.length) {
-              var src = root.displayAudioSources[root.selectedIndex]
-              if (src && src.audio) src.audio.muted = !src.audio.muted
-            }
-          } else if (root.focusSection === "output") {
-            if (root.selectedIndex === -1) {
-              root.toggleOutputMute()
-            } else if (root.selectedIndex >= 0 && root.selectedIndex < root.displayAudioSinks.length) {
-              var sk = root.displayAudioSinks[root.selectedIndex]
-              if (sk && sk.audio) sk.audio.muted = !sk.audio.muted
-            }
+            root.toggleInputMute()
+          } else {
+            root.toggleOutputMute()
           }
         }
       }
@@ -751,7 +708,6 @@ Panel {
             width: parent.width
             implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, powerSwitch.implicitHeight)
 
-            // Status only — the switch owns muting, mouse and keyboard alike.
             Text {
               id: heroIcon
               textFormat: Text.PlainText
@@ -764,9 +720,6 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
 
-            // Compact on/off switch on the trailing edge of the hero, and the
-            // header's only cursor target. Checked means something is still
-            // audible, so muting everything reads as switching audio off.
             ToggleSwitch {
               id: powerSwitch
               checked: root.anyAudible
@@ -843,18 +796,89 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
 
-              Text {
-                id: outputPercent
-                textFormat: Text.PlainText
-                text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
+              Row {
                 anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
-                opacity: root.outputMuted ? 0.5 : 1.0
+                spacing: Style.space(8)
+
+                // Toggle individual device volume sliders
+                Text {
+                  visible: root.displayAudioSinks.length > 1
+                  text: root.expandOutputLevels ? "󰝞 Hide levels" : "󰝝 Show levels"
+                  color: outputLevelsMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  MouseArea {
+                    id: outputLevelsMouse
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.expandOutputLevels = !root.expandOutputLevels
+                  }
+                }
+
+                Text {
+                  id: outputPercent
+                  textFormat: Text.PlainText
+                  text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
+                  color: Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: root.outputMuted ? 0.5 : 1.0
+                }
+              }
+            }
+
+            // Simultaneous Playback across all devices
+            Rectangle {
+              visible: root.displayAudioSinks.length > 1
+              width: parent.width
+              height: Style.space(24)
+              radius: Style.radius.sm || Style.space(3)
+              property bool isSimultaneous: {
+                for (var i = 0; i < root.soundCards.length; i++) {
+                  if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
+                }
+                return false
+              }
+              color: isSimultaneous ? Util.alpha(Color.accent, 0.25) : (simulMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.05))
+              border.color: isSimultaneous ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
+              border.width: 1
+
+              Row {
+                anchors.centerIn: parent
+                spacing: Style.space(6)
+
+                Text {
+                  text: parent.parent.isSimultaneous ? "󰄬" : "󰓃"
+                  color: parent.parent.isSimultaneous ? Color.accent : root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: parent.parent.isSimultaneous ? "Simultaneous Playback Active (All Devices)" : "Play on All Outputs Simultaneously"
+                  color: parent.parent.isSimultaneous ? Color.accent : root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+
+              MouseArea {
+                id: simulMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleSimultaneous()
               }
             }
 
@@ -890,58 +914,6 @@ Panel {
                   root.focusSection = "output"
                   root.selectedIndex = -1
                 }
-              }
-            }
-
-            PanelSeparator {
-              foreground: root.bar.foreground
-            }
-
-            Item {
-              width: parent.width
-              implicitHeight: Style.space(20)
-
-              Text {
-                text: "DEVICES"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                font.letterSpacing: 1.0
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              Row {
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(4)
-
-                Text {
-                  text: root.expandOutputLevels ? "Hide levels" : "Show levels"
-                  color: outputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Text {
-                  text: root.expandOutputLevels ? "󰅀" : "󰅂"
-                  color: outputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-              }
-
-              MouseArea {
-                id: outputToggleMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.expandOutputLevels = !root.expandOutputLevels
               }
             }
 
@@ -982,18 +954,42 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
 
-              Text {
-                id: microphonePercent
-                textFormat: Text.PlainText
-                text: Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
+              Row {
                 anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
-                opacity: root.inputMuted ? 0.5 : 1.0
+                spacing: Style.space(8)
+
+                // Toggle individual input gain sliders
+                Text {
+                  visible: root.displayAudioSources.length > 1
+                  text: root.expandInputLevels ? "󰝞 Hide levels" : "󰝝 Show levels"
+                  color: inputLevelsMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  MouseArea {
+                    id: inputLevelsMouse
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.expandInputLevels = !root.expandInputLevels
+                  }
+                }
+
+                Text {
+                  id: microphonePercent
+                  textFormat: Text.PlainText
+                  text: Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
+                  color: Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: root.inputMuted ? 0.5 : 1.0
+                }
               }
             }
 
@@ -1053,58 +1049,6 @@ Panel {
               }
             }
 
-            PanelSeparator {
-              foreground: root.bar.foreground
-            }
-
-            Item {
-              width: parent.width
-              implicitHeight: Style.space(20)
-
-              Text {
-                text: "SOURCES"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                font.letterSpacing: 1.0
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              Row {
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(4)
-
-                Text {
-                  text: root.expandInputLevels ? "Hide levels" : "Show levels"
-                  color: inputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Text {
-                  text: root.expandInputLevels ? "󰅀" : "󰅂"
-                  color: inputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-              }
-
-              MouseArea {
-                id: inputToggleMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.expandInputLevels = !root.expandInputLevels
-              }
-            }
-
             Repeater {
               model: root.displayAudioSources
 
@@ -1154,9 +1098,6 @@ Panel {
 
   // ---- Reusable inline components ----
 
-  // Output device row — cursor target inside the "output" section. Mouse
-  // hover updates the panel cursor at the root; visuals come entirely
-  // from hasCursor/current via CursorSurface, never from containsMouse.
   component SinkRow: CursorSurface {
     id: sinkRow
     required property var node
@@ -1164,9 +1105,9 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
-    readonly property real nodeVolume: node && node.audio ? node.audio.volume : 0
-    readonly property bool nodeMuted: node && node.audio ? node.audio.muted : false
     readonly property bool isActive: root.sink && node && root.sink.id === node.id
+    readonly property real sinkVolume: node && node.audio ? node.audio.volume : 0
+    readonly property bool sinkMuted: node && node.audio ? node.audio.muted : false
 
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
@@ -1174,7 +1115,9 @@ Panel {
     foreground: root.bar.foreground
     fill: root.hoverFill
     currentFill: root.selectedFill
-    implicitHeight: sinkRow.isEditing ? (sinkEditRow.implicitHeight + Style.spacing.xl) : (sinkColumn.implicitHeight + Style.spacing.xl)
+    implicitHeight: sinkRow.isEditing
+      ? (sinkEditRow.implicitHeight + Style.spacing.xl)
+      : (sinkColumn.implicitHeight + Style.spacing.xl)
 
     function startEditing() {
       sinkRow.editBuffer = root.nodeLabel(sinkRow.node)
@@ -1192,7 +1135,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         updated[targetNode] = nextName
         root.customRenames = updated
-        Quickshell.execDetached([root.renameBin, "set", targetNode, nextName, "--no-restart"])
+        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
       }
     }
 
@@ -1203,12 +1146,34 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         delete updated[targetNode]
         root.customRenames = updated
-        Quickshell.execDetached([root.renameBin, "reset", targetNode, "--no-restart"])
+        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
       }
     }
 
     function cancelEdit() {
       sinkRow.isEditing = false
+    }
+
+    MouseArea {
+      id: rowMouse
+      visible: !sinkRow.isEditing
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      z: 0
+      onContainsMouseChanged: if (containsMouse) {
+        root.cursorActive = true
+        root.focusSection = "output"
+        root.selectedIndex = sinkRow.rowIndex
+      }
+      onClicked: function(mouse) {
+        if (mouse.button === Qt.RightButton) {
+          sinkRow.startEditing()
+        } else {
+          root.setDefaultSink(sinkRow.node)
+        }
+      }
     }
 
     Column {
@@ -1219,96 +1184,66 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
-      spacing: Style.space(2)
+      spacing: Style.space(4)
+      z: 1
 
       Row {
-        id: sinkInner
         width: parent.width
         spacing: Style.space(8)
 
-        Item {
-          id: sinkSelectArea
-          width: parent.width - sinkEditIcon.width - Style.space(8)
-          height: Math.max(sinkGlyphText.implicitHeight, sinkLabelText.implicitHeight)
+        Text {
+          textFormat: Text.PlainText
+          text: root.sinkGlyph(sinkRow.node)
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.title
+          width: Style.space(22)
+          horizontalAlignment: Text.AlignHCenter
           anchors.verticalCenter: parent.verticalCenter
-
-          Row {
-            anchors.fill: parent
-            spacing: Style.space(8)
-
-            Text {
-              id: sinkGlyphText
-              textFormat: Text.PlainText
-              text: root.sinkGlyph(sinkRow.node)
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.title
-              width: Style.space(22)
-              horizontalAlignment: Text.AlignHCenter
-              anchors.verticalCenter: parent.verticalCenter
-              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
-            }
-
-            Text {
-              id: sinkLabelText
-              textFormat: Text.PlainText
-              text: root.nodeLabel(sinkRow.node)
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: sinkRow.isActive
-              elide: Text.ElideRight
-              width: parent.width - sinkGlyphText.width - sinkPct.width - Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
-            }
-
-            Text {
-              id: sinkPct
-              textFormat: Text.PlainText
-              text: Math.round(sinkRow.nodeVolume * 100) + "%"
-              color: Qt.darker(root.bar.foreground, 1.5)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              width: Style.space(36)
-              horizontalAlignment: Text.AlignRight
-              anchors.verticalCenter: parent.verticalCenter
-              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
-            }
-          }
-
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
-            cursorShape: Qt.PointingHandCursor
-            onContainsMouseChanged: if (containsMouse) {
-              root.cursorActive = true
-              root.focusSection = "output"
-              root.selectedIndex = sinkRow.rowIndex
-            }
-            onClicked: function(mouse) {
-              if (mouse.button === Qt.RightButton) {
-                sinkRow.startEditing()
-              } else {
-                root.setDefaultSink(sinkRow.node)
-              }
-            }
-          }
         }
 
         Text {
-          id: sinkEditIcon
           textFormat: Text.PlainText
-          text: "󰏫"
-          color: editArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+          text: root.nodeLabel(sinkRow.node)
+          color: root.bar.foreground
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.body
-          width: Style.space(20)
-          horizontalAlignment: Text.AlignHCenter
+          font.bold: sinkRow.isActive
+          elide: Text.ElideRight
+          width: parent.width - Style.space(22) - Style.space(8) - (root.expandOutputLevels ? Style.space(40) : 0) - Style.space(24)
           anchors.verticalCenter: parent.verticalCenter
-          opacity: (sinkRow.hasCursor || editArea.containsMouse) ? 1.0 : 0.3
+        }
+
+        Text {
+          visible: root.expandOutputLevels && !sinkRow.isActive
+          textFormat: Text.PlainText
+          text: Math.round(sinkRow.sinkVolume * 100) + "%"
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          width: Style.space(36)
+          horizontalAlignment: Text.AlignRight
+          anchors.verticalCenter: parent.verticalCenter
+          opacity: sinkRow.sinkMuted ? 0.5 : 1.0
+        }
+
+        // Rename pencil button
+        Item {
+          width: Style.space(20)
+          height: Style.space(20)
+          anchors.verticalCenter: parent.verticalCenter
+          z: 2
+
+          Text {
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: "󰏫"
+            color: editArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.body
+            opacity: (sinkRow.hasCursor || rowMouse.containsMouse || editArea.containsMouse) ? 1.0 : 0.3
+          }
 
           MouseArea {
             id: editArea
@@ -1316,26 +1251,24 @@ Panel {
             anchors.margins: -Style.space(4)
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onContainsMouseChanged: if (containsMouse) {
-              root.cursorActive = true
-              root.focusSection = "output"
-              root.selectedIndex = sinkRow.rowIndex
+            onClicked: function(mouse) {
+              mouse.accepted = true
+              sinkRow.startEditing()
             }
-            onClicked: sinkRow.startEditing()
           }
         }
       }
 
+      // Discrete per-device volume slider
       PanelSlider {
-        visible: root.expandOutputLevels
+        visible: root.expandOutputLevels && !sinkRow.isActive
         bar: root.bar
         width: parent.width
         minimum: 0
         maximum: 1
         step: 0.05
-        value: sinkRow.nodeVolume
-        opacity: sinkRow.nodeMuted ? 0.5 : 1.0
-        enabled: !!(sinkRow.node && sinkRow.node.audio)
+        value: sinkRow.sinkVolume
+        opacity: sinkRow.sinkMuted ? 0.5 : 1.0
 
         onMoved: function(v) {
           if (sinkRow.node && sinkRow.node.audio) sinkRow.node.audio.volume = v
@@ -1347,22 +1280,8 @@ Panel {
       }
     }
 
-    MouseArea {
-      visible: !sinkRow.isEditing
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-      propagateComposedEvents: true
-      onContainsMouseChanged: if (containsMouse) {
-        root.cursorActive = true
-        root.focusSection = "output"
-        root.selectedIndex = sinkRow.rowIndex
-      }
-    }
-
     Row {
       id: sinkEditRow
-      z: 10
       visible: sinkRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
@@ -1370,6 +1289,7 @@ Panel {
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
       spacing: Style.space(4)
+      z: 3
 
       TextField {
         id: sinkEditField
@@ -1445,7 +1365,6 @@ Panel {
     }
   }
 
-  // Input device row — sibling of SinkRow for the "input" section.
   component SourceRow: CursorSurface {
     id: sourceRow
     required property var node
@@ -1453,9 +1372,9 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
-    readonly property real nodeVolume: node && node.audio ? node.audio.volume : 0
-    readonly property bool nodeMuted: node && node.audio ? node.audio.muted : false
     readonly property bool isActive: root.source && node && root.source.id === node.id
+    readonly property real sourceVolume: node && node.audio ? node.audio.volume : 0
+    readonly property bool sourceMuted: node && node.audio ? node.audio.muted : false
 
     hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceRow)
@@ -1463,7 +1382,9 @@ Panel {
     foreground: root.bar.foreground
     fill: root.hoverFill
     currentFill: root.selectedFill
-    implicitHeight: sourceRow.isEditing ? (srcEditRow.implicitHeight + Style.spacing.xl) : (srcColumn.implicitHeight + Style.spacing.xl)
+    implicitHeight: sourceRow.isEditing
+      ? (srcEditRow.implicitHeight + Style.spacing.xl)
+      : (sourceColumn.implicitHeight + Style.spacing.xl)
 
     function startEditing() {
       sourceRow.editBuffer = root.nodeLabel(sourceRow.node)
@@ -1481,7 +1402,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         updated[targetNode] = nextName
         root.customRenames = updated
-        Quickshell.execDetached([root.renameBin, "set", targetNode, nextName, "--no-restart"])
+        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
       }
     }
 
@@ -1492,7 +1413,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         delete updated[targetNode]
         root.customRenames = updated
-        Quickshell.execDetached([root.renameBin, "reset", targetNode, "--no-restart"])
+        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
       }
     }
 
@@ -1500,104 +1421,96 @@ Panel {
       sourceRow.isEditing = false
     }
 
+    MouseArea {
+      id: srcRowMouse
+      visible: !sourceRow.isEditing
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      z: 0
+      onContainsMouseChanged: if (containsMouse) {
+        root.cursorActive = true
+        root.focusSection = "input"
+        root.selectedIndex = sourceRow.rowIndex
+      }
+      onClicked: function(mouse) {
+        if (mouse.button === Qt.RightButton) {
+          sourceRow.startEditing()
+        } else {
+          root.setDefaultSource(sourceRow.node)
+        }
+      }
+    }
+
     Column {
-      id: srcColumn
+      id: sourceColumn
       visible: !sourceRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
-      spacing: Style.space(2)
+      spacing: Style.space(4)
+      z: 1
 
       Row {
-        id: sourceInner
         width: parent.width
         spacing: Style.space(8)
 
-        Item {
-          id: srcSelectArea
-          width: parent.width - srcEditIcon.width - Style.space(8)
-          height: Math.max(srcGlyphText.implicitHeight, srcLabelText.implicitHeight)
+        Text {
+          textFormat: Text.PlainText
+          text: root.sourceGlyph(sourceRow.node)
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.title
+          width: Style.space(22)
+          horizontalAlignment: Text.AlignHCenter
           anchors.verticalCenter: parent.verticalCenter
-
-          Row {
-            anchors.fill: parent
-            spacing: Style.space(8)
-
-            Text {
-              id: srcGlyphText
-              textFormat: Text.PlainText
-              text: root.sourceGlyph(sourceRow.node)
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.title
-              width: Style.space(22)
-              horizontalAlignment: Text.AlignHCenter
-              anchors.verticalCenter: parent.verticalCenter
-              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
-            }
-
-            Text {
-              id: srcLabelText
-              textFormat: Text.PlainText
-              text: root.nodeLabel(sourceRow.node)
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: sourceRow.isActive
-              elide: Text.ElideRight
-              width: parent.width - srcGlyphText.width - srcPct.width - Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
-            }
-
-            Text {
-              id: srcPct
-              textFormat: Text.PlainText
-              text: Math.round(sourceRow.nodeVolume * 100) + "%"
-              color: Qt.darker(root.bar.foreground, 1.5)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              width: Style.space(36)
-              horizontalAlignment: Text.AlignRight
-              anchors.verticalCenter: parent.verticalCenter
-              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
-            }
-          }
-
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
-            cursorShape: Qt.PointingHandCursor
-            onContainsMouseChanged: if (containsMouse) {
-              root.cursorActive = true
-              root.focusSection = "input"
-              root.selectedIndex = sourceRow.rowIndex
-            }
-            onClicked: function(mouse) {
-              if (mouse.button === Qt.RightButton) {
-                sourceRow.startEditing()
-              } else {
-                root.setDefaultSource(sourceRow.node)
-              }
-            }
-          }
         }
 
         Text {
-          id: srcEditIcon
           textFormat: Text.PlainText
-          text: "󰏫"
-          color: srcEditArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+          text: root.nodeLabel(sourceRow.node)
+          color: root.bar.foreground
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.body
-          width: Style.space(20)
-          horizontalAlignment: Text.AlignHCenter
+          font.bold: sourceRow.isActive
+          elide: Text.ElideRight
+          width: parent.width - Style.space(22) - Style.space(8) - (root.expandInputLevels ? Style.space(40) : 0) - Style.space(24)
           anchors.verticalCenter: parent.verticalCenter
-          opacity: (sourceRow.hasCursor || srcEditArea.containsMouse) ? 1.0 : 0.3
+        }
+
+        Text {
+          visible: root.expandInputLevels && !sourceRow.isActive
+          textFormat: Text.PlainText
+          text: Math.round(sourceRow.sourceVolume * 100) + "%"
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          width: Style.space(36)
+          horizontalAlignment: Text.AlignRight
+          anchors.verticalCenter: parent.verticalCenter
+          opacity: sourceRow.sourceMuted ? 0.5 : 1.0
+        }
+
+        // Rename pencil button
+        Item {
+          width: Style.space(20)
+          height: Style.space(20)
+          anchors.verticalCenter: parent.verticalCenter
+          z: 2
+
+          Text {
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: "󰏫"
+            color: srcEditArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.body
+            opacity: (sourceRow.hasCursor || srcRowMouse.containsMouse || srcEditArea.containsMouse) ? 1.0 : 0.3
+          }
 
           MouseArea {
             id: srcEditArea
@@ -1605,26 +1518,24 @@ Panel {
             anchors.margins: -Style.space(4)
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onContainsMouseChanged: if (containsMouse) {
-              root.cursorActive = true
-              root.focusSection = "input"
-              root.selectedIndex = sourceRow.rowIndex
+            onClicked: function(mouse) {
+              mouse.accepted = true
+              sourceRow.startEditing()
             }
-            onClicked: sourceRow.startEditing()
           }
         }
       }
 
+      // Discrete per-device input gain slider
       PanelSlider {
-        visible: root.expandInputLevels
+        visible: root.expandInputLevels && !sourceRow.isActive
         bar: root.bar
         width: parent.width
         minimum: 0
         maximum: 1
         step: 0.05
-        value: sourceRow.nodeVolume
-        opacity: sourceRow.nodeMuted ? 0.5 : 1.0
-        enabled: !!(sourceRow.node && sourceRow.node.audio)
+        value: sourceRow.sourceVolume
+        opacity: sourceRow.sourceMuted ? 0.5 : 1.0
 
         onMoved: function(v) {
           if (sourceRow.node && sourceRow.node.audio) sourceRow.node.audio.volume = v
@@ -1636,22 +1547,8 @@ Panel {
       }
     }
 
-    MouseArea {
-      visible: !sourceRow.isEditing
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-      propagateComposedEvents: true
-      onContainsMouseChanged: if (containsMouse) {
-        root.cursorActive = true
-        root.focusSection = "input"
-        root.selectedIndex = sourceRow.rowIndex
-      }
-    }
-
     Row {
       id: srcEditRow
-      z: 10
       visible: sourceRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
@@ -1659,6 +1556,7 @@ Panel {
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
       spacing: Style.space(4)
+      z: 3
 
       TextField {
         id: srcEditField
@@ -1734,14 +1632,11 @@ Panel {
     }
   }
 
-  // Per-app stream row — cursor target inside the "streams" section.
-  // The stream has its own slider inline, so h/l from the keyboard
-  // adjusts THIS stream's volume (not the global output) when the cursor
-  // sits on this row. Enter/Space mutes the stream.
   component StreamRow: CursorSurface {
     id: streamRow
     required property var node
     required property int rowIndex
+    property bool isRoutingExpanded: false
 
     readonly property real streamVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool streamMuted: node && node.audio ? node.audio.muted : false
@@ -1762,7 +1657,8 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
-      spacing: Style.space(2)
+      spacing: Style.space(4)
+      z: 1
 
       Row {
         width: parent.width
@@ -1798,8 +1694,42 @@ Panel {
           font.pixelSize: Style.font.body
           font.bold: streamRow.isActive
           elide: Text.ElideRight
-          width: parent.width - streamMuteIcon.width - streamPct.width - Style.space(16)
+          width: parent.width - streamMuteIcon.width - streamPct.width - routeBtn.width - Style.space(24)
           anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Rectangle {
+          id: routeBtn
+          width: routeBtnText.implicitWidth + Style.space(10)
+          height: Style.space(20)
+          radius: Style.radius.sm || Style.space(3)
+          color: streamRow.isRoutingExpanded ? Util.alpha(Color.accent, 0.35) : (routeMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.15) : Util.alpha(root.bar.foreground, 0.08))
+          border.color: streamRow.isRoutingExpanded ? Color.accent : "transparent"
+          border.width: 1
+          anchors.verticalCenter: parent.verticalCenter
+          z: 3
+
+          Text {
+            id: routeBtnText
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: "󰌹 Route"
+            color: streamRow.isRoutingExpanded ? Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          MouseArea {
+            id: routeMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: function(mouse) {
+              mouse.accepted = true
+              streamRow.isRoutingExpanded = !streamRow.isRoutingExpanded
+            }
+          }
         }
 
         Text {
@@ -1834,6 +1764,90 @@ Panel {
             streamRow.node.audio.muted = !streamRow.node.audio.muted
         }
       }
+
+      // Dynamic stream routing destinations across listed outputs
+      Column {
+        width: parent.width
+        visible: streamRow.isRoutingExpanded
+        spacing: Style.space(4)
+        z: 4
+
+        Text {
+          text: "Output Destination:"
+          color: Qt.darker(root.bar.foreground, 1.4)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Flow {
+          width: parent.width
+          spacing: Style.space(4)
+
+          Repeater {
+            model: root.displayAudioSinks
+
+            Rectangle {
+              id: sinkChip
+              required property var modelData
+              readonly property bool isLinked: Model.streamIsLinkedToSink(streamRow.node, sinkChip.modelData, root.streamLinks)
+              width: targetContent.implicitWidth + Style.space(12)
+              height: Style.space(22)
+              radius: Style.radius.sm || Style.space(3)
+              color: sinkChip.isLinked ? Util.alpha(Color.accent, 0.3) : (targetMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.14) : Util.alpha(root.bar.foreground, 0.06))
+              border.color: sinkChip.isLinked ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
+              border.width: 1
+              z: 5
+
+              Row {
+                id: targetContent
+                anchors.centerIn: parent
+                spacing: Style.space(4)
+
+                Text {
+                  text: root.sinkGlyph(sinkChip.modelData)
+                  color: sinkChip.isLinked ? Color.accent : root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: root.nodeLabel(sinkChip.modelData)
+                  color: sinkChip.isLinked ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.2)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: sinkChip.isLinked
+                  elide: Text.ElideRight
+                  maximumLineCount: 1
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: sinkChip.isLinked ? "󰄬" : ""
+                  color: Color.accent
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: sinkChip.isLinked
+                }
+              }
+
+              MouseArea {
+                id: targetMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                z: 6
+                onClicked: function(mouse) {
+                  mouse.accepted = true
+                  root.toggleStreamRoute(streamRow.node, sinkChip.modelData)
+                }
+              }
+            }
+          }
+        }
+      }
     }
 
     MouseArea {
@@ -1841,6 +1855,7 @@ Panel {
       hoverEnabled: true
       acceptedButtons: Qt.NoButton
       propagateComposedEvents: true
+      z: 0
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "streams"
