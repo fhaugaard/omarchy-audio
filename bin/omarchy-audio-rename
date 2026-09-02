@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""
+omarchy-audio-rename
+
+CLI backend and WirePlumber manager for renaming audio devices in Omarchy.
+Manages ~/.config/omarchy/audio-renames.json and generates
+~/.config/wireplumber/wireplumber.conf.d/50-device-rename.conf.
+"""
+
+import sys
+import os
+import re
+import time
+import json
+import subprocess
+import argparse
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "omarchy"
+RENAMES_FILE = CONFIG_DIR / "audio-renames.json"
+WIREPLUMBER_DIR = Path.home() / ".config" / "wireplumber" / "wireplumber.conf.d"
+WIREPLUMBER_CONF = WIREPLUMBER_DIR / "50-device-rename.conf"
+
+
+def ensure_dirs():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    WIREPLUMBER_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_renames():
+    ensure_dirs()
+    if not RENAMES_FILE.exists():
+        return {}
+    try:
+        with open(RENAMES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        sys.stderr.write(f"Warning: Failed to parse {RENAMES_FILE}: {e}\n")
+        return {}
+
+
+def save_renames(renames):
+    ensure_dirs()
+    with open(RENAMES_FILE, "w", encoding="utf-8") as f:
+        json.dump(renames, f, indent=2)
+
+
+def get_default_nodes():
+    default_sink = None
+    default_source = None
+    try:
+        out = subprocess.check_output(["wpctl", "status"], text=True, stderr=subprocess.DEVNULL)
+        in_sinks = False
+        in_sources = False
+        for line in out.splitlines():
+            if "Sinks:" in line:
+                in_sinks = True
+                in_sources = False
+                continue
+            elif "Sources:" in line:
+                in_sinks = False
+                in_sources = True
+                continue
+            elif "Filters:" in line or "Streams:" in line or "Settings" in line or "Video" in line:
+                in_sinks = False
+                in_sources = False
+                continue
+
+            match = re.search(r"\*\s*(\d+)\.", line)
+            if match:
+                node_id = int(match.group(1))
+                if in_sinks and default_sink is None:
+                    default_sink = node_id
+                elif in_sources and default_source is None:
+                    default_source = node_id
+    except Exception:
+        pass
+    return default_sink, default_source
+
+
+def get_pipewire_devices():
+    try:
+        raw = subprocess.check_output(["pw-dump"], text=True, stderr=subprocess.DEVNULL)
+        data = json.loads(raw)
+    except Exception as e:
+        sys.stderr.write(f"Error reading PipeWire status via pw-dump: {e}\n")
+        return []
+
+    default_sink_id, default_source_id = get_default_nodes()
+    renames = load_renames()
+
+    devices = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        props = item.get("info", {}).get("props", {})
+        media_class = props.get("media.class", "")
+        if media_class not in ["Audio/Sink", "Audio/Source"]:
+            continue
+
+        node_id = item.get("id")
+        node_name = props.get("node.name", "")
+        if not node_name or node_name == "auto_null" or node_name.startswith("auto_null"):
+            continue
+
+        kind = "sink" if media_class == "Audio/Sink" else "source"
+        is_default = (node_id == default_sink_id) if kind == "sink" else (node_id == default_source_id)
+
+        desc = props.get("node.description") or props.get("device.description") or node_name
+        nick = props.get("node.nick") or ""
+        bus = props.get("device.bus") or ("bluetooth" if "bluez" in node_name else "alsa")
+        alias = renames.get(node_name, "")
+
+        devices.append({
+            "id": node_id,
+            "node_name": node_name,
+            "kind": kind,
+            "description": desc,
+            "nick": nick,
+            "bus": bus,
+            "alias": alias,
+            "is_default": is_default,
+        })
+
+    devices.sort(key=lambda d: (0 if d["kind"] == "sink" else 1, 0 if d["is_default"] else 1, d["id"]))
+    return devices
+
+
+def generate_wireplumber_conf(renames):
+    ensure_dirs()
+    if not renames:
+        if WIREPLUMBER_CONF.exists():
+            WIREPLUMBER_CONF.unlink()
+        return
+
+    alsa_rules = []
+    bluez_rules = []
+
+    for node_name, alias in renames.items():
+        if not alias or not alias.strip():
+            continue
+        clean_alias = alias.strip()
+        quoted_node_name = json.dumps(node_name)
+        quoted_alias = json.dumps(clean_alias)
+        rule = f"""  {{
+    matches = [
+      {{
+        node.name = {quoted_node_name}
+      }}
+    ]
+    actions = {{
+      update-props = {{
+        node.description = {quoted_alias}
+        node.nick = {quoted_alias}
+      }}
+    }}
+  }}"""
+        if node_name.startswith("bluez_"):
+            bluez_rules.append(rule)
+        else:
+            alsa_rules.append(rule)
+
+    content = "## Generated by omarchy-audio-rename. Do not edit manually.\n\n"
+    if alsa_rules:
+        content += "monitor.alsa.rules = [\n" + ",\n".join(alsa_rules) + "\n]\n\n"
+    if bluez_rules:
+        content += "monitor.bluez.rules = [\n" + ",\n".join(bluez_rules) + "\n]\n\n"
+
+    with open(WIREPLUMBER_CONF, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def wait_for_devices(timeout=3.0, interval=0.08):
+    start = time.time()
+    last_count = 0
+    stable_checks = 0
+    while time.time() - start < timeout:
+        try:
+            raw = subprocess.check_output(["pw-dump"], text=True, stderr=subprocess.DEVNULL)
+            data = json.loads(raw)
+            valid_nodes = [
+                item for item in data
+                if isinstance(item, dict)
+                and item.get("info", {}).get("props", {}).get("media.class") in ["Audio/Sink", "Audio/Source"]
+                and item.get("info", {}).get("props", {}).get("node.name") != "auto_null"
+                and not (item.get("info", {}).get("props", {}).get("node.name") or "").startswith("auto_null")
+            ]
+            count = len(valid_nodes)
+            if count > 0:
+                if count == last_count:
+                    stable_checks += 1
+                    if stable_checks >= 2:
+                        return True
+                else:
+                    last_count = count
+                    stable_checks = 0
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
+
+
+def restart_wireplumber():
+    try:
+        subprocess.run(["systemctl", "--user", "restart", "wireplumber"], check=True)
+        wait_for_devices()
+        return True
+    except Exception as e:
+        sys.stderr.write(f"Error restarting wireplumber: {e}\n")
+        return False
+
+
+def cmd_list(args):
+    devices = get_pipewire_devices()
+    if args.json:
+        print(json.dumps(devices, indent=2))
+        return
+
+    sinks = [d for d in devices if d["kind"] == "sink"]
+    sources = [d for d in devices if d["kind"] == "source"]
+
+    print("=== Audio Output Devices (Sinks) ===")
+    if not sinks:
+        print("  (No audio outputs detected)")
+    for d in sinks:
+        def_tag = " [DEFAULT]" if d["is_default"] else ""
+        alias_tag = f" -> ALIAS: \033[1;32m\"{d['alias']}\"\033[0m" if d["alias"] else ""
+        print(f"  [{d['id']:3d}] {d['description']}{def_tag}{alias_tag}")
+        print(f"        Node: {d['node_name']}")
+
+    if args.all or sources:
+        print("\n=== Audio Input Devices (Sources) ===")
+        for d in sources:
+            def_tag = " [DEFAULT]" if d["is_default"] else ""
+            alias_tag = f" -> ALIAS: \033[1;32m\"{d['alias']}\"\033[0m" if d["alias"] else ""
+            print(f"  [{d['id']:3d}] {d['description']}{def_tag}{alias_tag}")
+            print(f"        Node: {d['node_name']}")
+
+
+def resolve_device(target, devices):
+    target_str = str(target).strip()
+    try:
+        target_id = int(target_str)
+        for d in devices:
+            if d["id"] == target_id:
+                return d
+    except ValueError:
+        pass
+
+    for d in devices:
+        if d["node_name"] == target_str:
+            return d
+
+    target_lower = target_str.lower()
+    matches = [d for d in devices if target_lower in d["node_name"].lower() or target_lower in d["description"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        sys.stderr.write(f"Error: Ambiguous device '{target_str}'. Matches:\n")
+        for m in matches:
+            sys.stderr.write(f"  - [{m['id']}] {m['description']} ({m['node_name']})\n")
+        sys.exit(1)
+
+    return None
+
+
+def cmd_set(args):
+    devices = get_pipewire_devices()
+    dev = resolve_device(args.target, devices)
+    node_name = dev["node_name"] if dev else args.target
+
+    new_name = args.name.strip()
+    if not new_name:
+        sys.stderr.write("Error: Alias name cannot be empty.\n")
+        sys.exit(1)
+
+    renames = load_renames()
+    renames[node_name] = new_name
+    save_renames(renames)
+    generate_wireplumber_conf(renames)
+    if not getattr(args, "no_restart", False):
+        restart_wireplumber()
+
+    display = dev["description"] if dev else node_name
+    print(f"✓ Renamed device '{display}' to '{new_name}'")
+
+
+def cmd_reset(args):
+    devices = get_pipewire_devices()
+    dev = resolve_device(args.target, devices)
+    node_name = dev["node_name"] if dev else args.target
+
+    renames = load_renames()
+    if node_name in renames:
+        del renames[node_name]
+        save_renames(renames)
+        generate_wireplumber_conf(renames)
+        if not getattr(args, "no_restart", False):
+            restart_wireplumber()
+        display = dev["description"] if dev else node_name
+        print(f"✓ Reset alias for '{display}'")
+    else:
+        print(f"No custom alias was set for '{node_name}'")
+
+
+def cmd_reset_all(args):
+    renames = {}
+    save_renames(renames)
+    generate_wireplumber_conf(renames)
+    if not getattr(args, "no_restart", False):
+        restart_wireplumber()
+    print("✓ Reset all device aliases to system defaults")
+
+
+def cmd_gui(args):
+    try:
+        subprocess.run(["omarchy-shell", "shell", "summon", "skye.audio", "{}"], check=True)
+    except Exception as e:
+        sys.stderr.write(f"Error summoning Omarchy UI: {e}\n")
+        sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="omarchy-audio-rename",
+        description="Rename audio output/input devices in Omarchy and WirePlumber."
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    list_parser = subparsers.add_parser("list", help="List audio devices and their aliases")
+    list_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    list_parser.add_argument("--all", action="store_true", help="Show all devices including inputs")
+
+    set_parser = subparsers.add_parser("set", help="Set a custom name for an audio device")
+    set_parser.add_argument("target", help="Device ID, node name, or matching text")
+    set_parser.add_argument("name", help="New custom name for the device")
+    set_parser.add_argument("--no-restart", action="store_true", help="Do not restart WirePlumber")
+
+    reset_parser = subparsers.add_parser("reset", help="Reset a device name to system default")
+    reset_parser.add_argument("target", help="Device ID, node name, or matching text")
+    reset_parser.add_argument("--no-restart", action="store_true", help="Do not restart WirePlumber")
+
+    reset_all_parser = subparsers.add_parser("reset-all", help="Reset all audio device aliases to system defaults")
+    reset_all_parser.add_argument("--no-restart", action="store_true", help="Do not restart WirePlumber")
+
+    subparsers.add_parser("gui", help="Open the Omarchy audio panel")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        args.json = False
+        args.all = False
+        cmd_list(args)
+        return
+
+    if args.command == "list":
+        cmd_list(args)
+    elif args.command == "set":
+        cmd_set(args)
+    elif args.command == "reset":
+        cmd_reset(args)
+    elif args.command == "reset-all":
+        cmd_reset_all(args)
+    elif args.command == "gui":
+        cmd_gui(args)
+
+
+if __name__ == "__main__":
+    main()
