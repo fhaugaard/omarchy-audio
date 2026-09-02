@@ -13,6 +13,9 @@ Panel {
   moduleName: "omarchy.audio"
   ipcTarget: "omarchy.audio"
 
+  readonly property string renameBin: Qt.resolvedUrl("bin/omarchy-audio-rename").toString().replace(/^file:\/\//, "")
+  readonly property string routingBin: Qt.resolvedUrl("bin/omarchy-audio-routing").toString().replace(/^file:\/\//, "")
+
   readonly property var sink: Pipewire.defaultAudioSink
   readonly property var source: Pipewire.defaultAudioSource
   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
@@ -229,12 +232,24 @@ Panel {
   }
 
   function adjustVolume(delta) {
-    if (focusSection === "output" && selectedIndex === -1) {
-      setOutputVolume(outputVolume + delta)
+    if (focusSection === "output") {
+      if (selectedIndex === -1) {
+        setOutputVolume(outputVolume + delta)
+      } else if (selectedIndex >= 0 && selectedIndex < displayAudioSinks.length) {
+        var sinkNode = displayAudioSinks[selectedIndex]
+        if (sinkNode && sinkNode.audio)
+          sinkNode.audio.volume = Math.max(0, Math.min(1, sinkNode.audio.volume + delta))
+      }
       return
     }
-    if (focusSection === "input" && selectedIndex === -1) {
-      setInputVolume(inputVolume + delta)
+    if (focusSection === "input") {
+      if (selectedIndex === -1) {
+        setInputVolume(inputVolume + delta)
+      } else if (selectedIndex >= 0 && selectedIndex < displayAudioSources.length) {
+        var srcNode = displayAudioSources[selectedIndex]
+        if (srcNode && srcNode.audio)
+          srcNode.audio.volume = Math.max(0, Math.min(1, srcNode.audio.volume + delta))
+      }
       return
     }
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
@@ -525,7 +540,7 @@ Panel {
   }
 
   function toggleSimultaneous() {
-    Quickshell.execDetached(["omarchy-audio-routing", "toggle-simultaneous"])
+    Quickshell.execDetached([root.routingBin, "toggle-simultaneous"])
     Qt.callLater(function() {
       refreshRoutingState()
       scheduleDisplayAudioModelRefresh()
@@ -538,7 +553,7 @@ Panel {
     var streamName = String(streamNode.name || Model.rawStreamLabel(streamNode) || "")
     var sinkName = String(sinkNode.name || "")
     var sinkId = String(sinkNode.id !== undefined ? sinkNode.id : "")
-    Quickshell.execDetached(["omarchy-audio-routing", "route-stream-to-sink", streamId, sinkName, streamName, sinkId])
+    Quickshell.execDetached([root.routingBin, "route-stream-to-sink", streamId, sinkName, streamName, sinkId])
     Qt.callLater(function() {
       if (!streamLinksProc.running) streamLinksProc.running = true
     })
@@ -577,7 +592,7 @@ Panel {
 
   Process {
     id: cardsProc
-    command: ["omarchy-audio-routing", "list-cards"]
+    command: [root.routingBin, "list-cards"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.soundCards = Model.parseCardProfiles(text)
@@ -586,7 +601,7 @@ Panel {
 
   Process {
     id: streamLinksProc
-    command: ["omarchy-audio-routing", "list-streams-and-links"]
+    command: [root.routingBin, "list-streams-and-links"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.streamLinks = Model.parseStreamLinks(text)
@@ -1135,7 +1150,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         updated[targetNode] = nextName
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "set", targetNode, nextName, "--no-restart"])
       }
     }
 
@@ -1146,7 +1161,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         delete updated[targetNode]
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "reset", targetNode, "--no-restart"])
       }
     }
 
@@ -1402,7 +1417,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         updated[targetNode] = nextName
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "set", targetNode, nextName, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "set", targetNode, nextName, "--no-restart"])
       }
     }
 
@@ -1413,7 +1428,7 @@ Panel {
         var updated = Object.assign({}, root.customRenames)
         delete updated[targetNode]
         root.customRenames = updated
-        Quickshell.execDetached(["omarchy-audio-rename", "reset", targetNode, "--no-restart"])
+        Quickshell.execDetached([root.renameBin, "reset", targetNode, "--no-restart"])
       }
     }
 

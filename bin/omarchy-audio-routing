@@ -22,10 +22,22 @@ EOF
 }
 
 function unmute_alsa_card() {
-  local card_idx="${1:-2}"
-  for ctrl in Master Front Headphone Surround Center LFE Line; do
-    amixer -c "$card_idx" set "$ctrl" unmute 100% 2>/dev/null || true
-  done
+  local target_card="${1:-}"
+  if [[ -n "$target_card" ]]; then
+    for ctrl in Master Front Headphone Surround Center LFE Line; do
+      amixer -c "$target_card" set "$ctrl" unmute 100% 2>/dev/null || true
+    done
+    return
+  fi
+
+  # Dynamically discover all ALSA sound card indices
+  while read -r card_num; do
+    if [[ -n "$card_num" ]]; then
+      for ctrl in Master Front Headphone Surround Center LFE Line; do
+        amixer -c "$card_num" set "$ctrl" unmute 100% 2>/dev/null || true
+      done
+    fi
+  done < <(aplay -l 2>/dev/null | grep -E '^card [0-9]+:' | awk '{print $2}' | tr -d ':' | sort -u)
 }
 
 case "$cmd" in
@@ -58,6 +70,8 @@ for c in cards_raw:
     profiles_raw = c.get("profiles", {})
     active = c.get("active_profile", "")
     card_name = c.get("name", "")
+    card_idx_str = str(c.get("index"))
+    card_bus = props.get("device.bus_path") or ""
     
     profiles = []
     has_pro = "pro-audio" in profiles_raw
@@ -78,14 +92,22 @@ for c in cards_raw:
     for sk in sinks_raw:
         sk_name = sk.get("name", "")
         sk_props = sk.get("properties", {})
-        if (sk_props.get("device.name") == card_name) or ("2f_00.4" in card_name and "2f_00.4" in sk_name):
-            if "omarchy_combined" not in sk_name:
-                card_sinks.append({
-                    "name": sk_name,
-                    "description": sk.get("description", sk_name),
-                    "activePort": sk.get("active_port"),
-                    "ports": [p.get("name") for p in sk.get("ports", [])]
-                })
+        sk_card = str(sk_props.get("device.card") or sk_props.get("card.profile.device") or "")
+        sk_dev = sk_props.get("device.name") or ""
+        
+        is_card_sink = (
+            (sk_dev and sk_dev == card_name)
+            or (sk_card and sk_card == card_idx_str)
+            or (card_bus and card_bus in sk_name)
+            or (card_name and card_name.replace("alsa_card.", "alsa_output.") in sk_name)
+        )
+        if is_card_sink and "omarchy_combined" not in sk_name:
+            card_sinks.append({
+                "name": sk_name,
+                "description": sk.get("description", sk_name),
+                "activePort": sk.get("active_port"),
+                "ports": [p.get("name") for p in sk.get("ports", [])]
+            })
 
     cards.append({
         "id": c.get("index"),
@@ -250,12 +272,8 @@ else:
 
   reset-all)
     pactl unload-module $(pactl list modules short | grep module-combine-sink | awk '{print $1}') 2>/dev/null || true
-    pactl set-card-profile alsa_card.pci-0000_2f_00.4 output:analog-stereo+input:analog-stereo 2>/dev/null || true
-    unmute_alsa_card 2
-    pactl set-sink-port alsa_output.pci-0000_2f_00.4.analog-stereo analog-output-lineout 2>/dev/null || true
-    pactl set-default-sink alsa_output.pci-0000_2f_00.4.analog-stereo 2>/dev/null || true
+    unmute_alsa_card
     pactl list sink-inputs short | awk '{print $1}' | while read id; do
-      pactl move-sink-input "$id" alsa_output.pci-0000_2f_00.4.analog-stereo 2>/dev/null || true
       pactl set-sink-input-mute "$id" 0 2>/dev/null || true
     done
     echo "Reset complete: all devices, streams, and ALSA mixers restored to clean defaults."
