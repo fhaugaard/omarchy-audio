@@ -61,8 +61,12 @@ function nodeProps(node) {
   return node && node.ready && node.properties ? node.properties : {}
 }
 
-function nodeLabel(node) {
+function nodeLabel(node, customRenames) {
   if (!node) return "Unknown"
+  var name = node.name ? String(node.name) : ""
+  if (customRenames && name && customRenames[name]) {
+    return friendlyDeviceLabel(customRenames[name])
+  }
   var p = nodeProps(node)
   var nickname = friendlyDeviceLabel(node.nickname || node.nick || p["node.nick"] || p["device.profile.description"] || "")
   if (nickname) return nickname
