@@ -6,7 +6,7 @@
 
 An enhanced sound control panel and audio mixer for the [Omarchy](https://omarchy.org/) desktop shell. Built on **Quickshell**, **PipeWire**, and **WirePlumber**.
 
-This plugin elevates the stock `omarchy.audio` experience with **instant inline device renaming**, **independent per-device level controls**, **per-application stream mixing**, **MPRIS media correlation**, and **full keyboard navigation**.
+This plugin elevates the stock `omarchy.audio` experience with **instant inline device renaming**, **independent per-device level controls**, **per-application stream mixing**, **MPRIS media correlation**, **bundled CLI utility**, and **full keyboard navigation**.
 
 ---
 
@@ -61,59 +61,79 @@ The audio panel features complete keyboard accessibility with Vim-friendly bindi
 
 ## 📦 Installation & Setup
 
-### 1. Requirements
-- [Omarchy](https://omarchy.org/) desktop shell with Quickshell.
-- [`omarchy-audio-rename`](https://github.com/fhaugaard/omarchy-audio-renamer) CLI utility in your `PATH` (typically installed at `~/.local/bin/omarchy-audio-rename`).
+### 🚀 One-Step Install (Recommended)
 
-### 2. Install Plugin
-
-Clone the repository directly into your Omarchy plugins directory:
+Install and enable the plugin directly using the Omarchy CLI:
 
 ```bash
-git clone https://github.com/fhaugaard/omarchy-audio.git ~/.config/omarchy/plugins/skye.audio
+omarchy plugin add https://github.com/fhaugaard/omarchy-audio.git --enable --yes
 ```
 
-*Or symlink your local working directory:*
+Everything in the UI and sound mixer works immediately out of the box with zero extra configuration.
+
+*(Optional)* To make the bundled `omarchy-audio-rename` CLI available globally in your terminal `$PATH`:
 
 ```bash
-ln -s /path/to/omarchy-audio ~/.config/omarchy/plugins/skye.audio
+~/.config/omarchy/plugins/skye.audio/setup.sh --yes
 ```
 
-### 3. Add to Bar Configuration
+---
 
-Add `"skye.audio"` to your bar layout in `~/.config/omarchy/shell.json`:
+### 🛠️ Manual Installation
 
-```jsonc
-{
-  "bar": {
-    "layout": {
-      "right": [
-        {
-          "id": "omarchy.network"
-        },
-        {
-          "id": "skye.audio"
-        },
-        {
-          "id": "omarchy.power"
-        }
-      ]
-    }
-  },
-  "plugins": [
-    {
-      "id": "skye.audio"
-    }
-  ]
-}
-```
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/fhaugaard/omarchy-audio.git ~/.config/omarchy/plugins/skye.audio
+   ```
 
-### 4. Restart the Shell
+2. **Run setup**:
+   ```bash
+   ~/.config/omarchy/plugins/skye.audio/setup.sh
+   ```
 
-Apply the changes by restarting the Omarchy shell:
+3. *(Optional)* If configuring manually without `setup.sh`, add `"skye.audio"` to `~/.config/omarchy/shell.json`:
+   ```jsonc
+   {
+     "bar": {
+       "layout": {
+         "right": [
+           { "id": "omarchy.network" },
+           { "id": "skye.audio" },
+           { "id": "omarchy.power" }
+         ]
+       }
+     },
+     "plugins": [
+       { "id": "skye.audio" }
+     ]
+   }
+   ```
+   Then reload the shell:
+   ```bash
+   omarchy restart shell
+   ```
+
+---
+
+## 💻 CLI Utility (`omarchy-audio-rename`)
+
+The bundled CLI utility provides terminal management of audio device aliases:
 
 ```bash
-omarchy restart shell
+# List all audio devices and their current aliases
+omarchy-audio-rename list --all
+
+# Set a custom alias for an audio device (by ID, node name, or partial search)
+omarchy-audio-rename set "Yeti Nano" "Studio Microphone"
+
+# Reset a device back to system default name
+omarchy-audio-rename reset "Studio Microphone"
+
+# Reset all custom aliases
+omarchy-audio-rename reset-all
+
+# Open the Omarchy audio panel directly
+omarchy-audio-rename gui
 ```
 
 ---
@@ -122,10 +142,13 @@ omarchy restart shell
 
 ```
 omarchy-audio/
-├── manifest.json   # Plugin manifest and bar widget registration
-├── Panel.qml       # Main audio mixer popup, hero header, device list, and streams
-├── Model.js        # Device glyph resolution, label formatting, and audio models
-└── README.md       # Documentation
+├── bin/
+│   └── omarchy-audio-rename  # Bundled CLI backend & WirePlumber manager
+├── setup.sh                  # Optional automated helper & CLI symlinker
+├── manifest.json             # Plugin manifest and bar widget registration
+├── Panel.qml                 # Main audio mixer popup, hero header, device list, and streams
+├── Model.js                  # Device glyph resolution, label formatting, and audio models
+└── README.md                 # Documentation
 ```
 
 ---
