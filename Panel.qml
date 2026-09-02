@@ -57,6 +57,8 @@ Panel {
 
   property var sinkAvailability: ({})
   property bool sinkAvailabilityLoaded: false
+  property bool expandOutputLevels: false
+  property bool expandInputLevels: false
 
   // Identify true playback streams without reading node.properties here:
   // PwNode.properties is invalid until the node is bound, and reading it while
@@ -272,12 +274,22 @@ Panel {
   // — the cursor is on a discrete row, not on the slider, and silently
   // moving the global slider would surprise the user.
   function adjustVolume(delta) {
-    if (focusSection === "output" && selectedIndex === -1) {
-      setOutputVolume(outputVolume + delta)
+    if (focusSection === "output") {
+      if (selectedIndex === -1) {
+        setOutputVolume(outputVolume + delta)
+      } else if (selectedIndex >= 0 && selectedIndex < displayAudioSinks.length) {
+        var sk = displayAudioSinks[selectedIndex]
+        if (sk && sk.audio) sk.audio.volume = Math.max(0, Math.min(1, sk.audio.volume + delta))
+      }
       return
     }
-    if (focusSection === "input" && selectedIndex === -1) {
-      setInputVolume(inputVolume + delta)
+    if (focusSection === "input") {
+      if (selectedIndex === -1) {
+        setInputVolume(inputVolume + delta)
+      } else if (selectedIndex >= 0 && selectedIndex < displayAudioSources.length) {
+        var src = displayAudioSources[selectedIndex]
+        if (src && src.audio) src.audio.volume = Math.max(0, Math.min(1, src.audio.volume + delta))
+      }
       return
     }
     if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
@@ -669,8 +681,8 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        // 'm' mutes whatever the cursor is on: focused section's slider
-        // for output/input, the focused stream for streams.
+        // 'm' mutes whatever the cursor is on: focused section's master slider
+        // (if selectedIndex === -1), the focused device, or the focused stream.
         if (t === "m" || t === "M") {
           if (!root.cursorActive) return
           if (root.focusSection === "streams" && root.selectedIndex >= 0
@@ -678,9 +690,19 @@ Panel {
             var s = root.displayAudioStreams[root.selectedIndex]
             if (s && s.audio) s.audio.muted = !s.audio.muted
           } else if (root.focusSection === "input") {
-            root.toggleInputMute()
-          } else {
-            root.toggleOutputMute()
+            if (root.selectedIndex === -1) {
+              root.toggleInputMute()
+            } else if (root.selectedIndex >= 0 && root.selectedIndex < root.displayAudioSources.length) {
+              var src = root.displayAudioSources[root.selectedIndex]
+              if (src && src.audio) src.audio.muted = !src.audio.muted
+            }
+          } else if (root.focusSection === "output") {
+            if (root.selectedIndex === -1) {
+              root.toggleOutputMute()
+            } else if (root.selectedIndex >= 0 && root.selectedIndex < root.displayAudioSinks.length) {
+              var sk = root.displayAudioSinks[root.selectedIndex]
+              if (sk && sk.audio) sk.audio.muted = !sk.audio.muted
+            }
           }
         }
       }
@@ -850,6 +872,58 @@ Panel {
               }
             }
 
+            PanelSeparator {
+              foreground: root.bar.foreground
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: Style.space(20)
+
+              Text {
+                text: "DEVICES"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.0
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Row {
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Text {
+                  text: root.expandOutputLevels ? "Hide levels" : "Show levels"
+                  color: outputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: root.expandOutputLevels ? "󰅀" : "󰅂"
+                  color: outputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+
+              MouseArea {
+                id: outputToggleMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.expandOutputLevels = !root.expandOutputLevels
+              }
+            }
+
             Repeater {
               model: root.displayAudioSinks
 
@@ -958,6 +1032,58 @@ Panel {
               }
             }
 
+            PanelSeparator {
+              foreground: root.bar.foreground
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: Style.space(20)
+
+              Text {
+                text: "SOURCES"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.0
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Row {
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Text {
+                  text: root.expandInputLevels ? "Hide levels" : "Show levels"
+                  color: inputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: root.expandInputLevels ? "󰅀" : "󰅂"
+                  color: inputToggleMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+
+              MouseArea {
+                id: inputToggleMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.expandInputLevels = !root.expandInputLevels
+              }
+            }
+
             Repeater {
               model: root.displayAudioSources
 
@@ -1017,14 +1143,17 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
+    readonly property real nodeVolume: node && node.audio ? node.audio.volume : 0
+    readonly property bool nodeMuted: node && node.audio ? node.audio.muted : false
     readonly property bool isActive: root.sink && node && root.sink.id === node.id
+
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
     current: isActive
     foreground: root.bar.foreground
     fill: root.hoverFill
     currentFill: root.selectedFill
-    implicitHeight: sinkRow.isEditing ? (sinkEditRow.implicitHeight + Style.spacing.xl) : (sinkInner.implicitHeight + Style.spacing.xl)
+    implicitHeight: sinkRow.isEditing ? (sinkEditRow.implicitHeight + Style.spacing.xl) : (sinkColumn.implicitHeight + Style.spacing.xl)
 
     function startEditing() {
       sinkRow.editBuffer = root.nodeLabel(sinkRow.node)
@@ -1057,84 +1186,158 @@ Panel {
       sinkRow.isEditing = false
     }
 
-    Row {
-      id: sinkInner
+    Column {
+      id: sinkColumn
       visible: !sinkRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
+      spacing: Style.space(2)
 
-      Text {
-        textFormat: Text.PlainText
-        text: root.sinkGlyph(sinkRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.title
-        width: Style.space(22)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
+      Row {
+        id: sinkInner
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item {
+          id: sinkSelectArea
+          width: parent.width - sinkEditIcon.width - Style.space(8)
+          height: Math.max(sinkGlyphText.implicitHeight, sinkLabelText.implicitHeight)
+          anchors.verticalCenter: parent.verticalCenter
+
+          Row {
+            anchors.fill: parent
+            spacing: Style.space(8)
+
+            Text {
+              id: sinkGlyphText
+              textFormat: Text.PlainText
+              text: root.sinkGlyph(sinkRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              width: Style.space(22)
+              horizontalAlignment: Text.AlignHCenter
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: sinkLabelText
+              textFormat: Text.PlainText
+              text: root.nodeLabel(sinkRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: sinkRow.isActive
+              elide: Text.ElideRight
+              width: parent.width - sinkGlyphText.width - sinkPct.width - Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: sinkPct
+              textFormat: Text.PlainText
+              text: Math.round(sinkRow.nodeVolume * 100) + "%"
+              color: Qt.darker(root.bar.foreground, 1.5)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              width: Style.space(36)
+              horizontalAlignment: Text.AlignRight
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "output"
+              root.selectedIndex = sinkRow.rowIndex
+            }
+            onClicked: function(mouse) {
+              if (mouse.button === Qt.RightButton) {
+                sinkRow.startEditing()
+              } else {
+                root.setDefaultSink(sinkRow.node)
+              }
+            }
+          }
+        }
+
+        Text {
+          id: sinkEditIcon
+          textFormat: Text.PlainText
+          text: "󰏫"
+          color: editArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          width: Style.space(20)
+          horizontalAlignment: Text.AlignHCenter
+          anchors.verticalCenter: parent.verticalCenter
+          opacity: (sinkRow.hasCursor || editArea.containsMouse) ? 1.0 : 0.3
+
+          MouseArea {
+            id: editArea
+            anchors.fill: parent
+            anchors.margins: -Style.space(4)
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "output"
+              root.selectedIndex = sinkRow.rowIndex
+            }
+            onClicked: sinkRow.startEditing()
+          }
+        }
       }
 
-      Text {
-        textFormat: Text.PlainText
-        text: root.nodeLabel(sinkRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: sinkRow.isActive
-        elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(8) - Style.space(24)
-        anchors.verticalCenter: parent.verticalCenter
-      }
+      PanelSlider {
+        visible: root.expandOutputLevels
+        bar: root.bar
+        width: parent.width
+        minimum: 0
+        maximum: 1
+        step: 0.05
+        value: sinkRow.nodeVolume
+        opacity: sinkRow.nodeMuted ? 0.5 : 1.0
+        enabled: !!(sinkRow.node && sinkRow.node.audio)
 
-      Text {
-        textFormat: Text.PlainText
-        text: "󰏫"
-        color: editArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        width: Style.space(20)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
-        opacity: (sinkRow.hasCursor || rowMouse.containsMouse || editArea.containsMouse) ? 1.0 : 0.3
-
-        MouseArea {
-          id: editArea
-          anchors.fill: parent
-          anchors.margins: -Style.space(4)
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: sinkRow.startEditing()
+        onMoved: function(v) {
+          if (sinkRow.node && sinkRow.node.audio) sinkRow.node.audio.volume = v
+        }
+        onRightClicked: {
+          if (sinkRow.node && sinkRow.node.audio)
+            sinkRow.node.audio.muted = !sinkRow.node.audio.muted
         }
       }
     }
 
     MouseArea {
-      id: rowMouse
       visible: !sinkRow.isEditing
       anchors.fill: parent
       hoverEnabled: true
-      acceptedButtons: Qt.LeftButton | Qt.RightButton
-      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.NoButton
+      propagateComposedEvents: true
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "output"
         root.selectedIndex = sinkRow.rowIndex
       }
-      onClicked: function(mouse) {
-        if (mouse.button === Qt.RightButton) {
-          sinkRow.startEditing()
-        } else {
-          root.setDefaultSink(sinkRow.node)
-        }
-      }
     }
 
     Row {
       id: sinkEditRow
+      z: 10
       visible: sinkRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
@@ -1225,14 +1428,17 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
+    readonly property real nodeVolume: node && node.audio ? node.audio.volume : 0
+    readonly property bool nodeMuted: node && node.audio ? node.audio.muted : false
     readonly property bool isActive: root.source && node && root.source.id === node.id
+
     hasCursor: root.cursorActive && root.focusSection === "input" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sourceRow)
     current: isActive
     foreground: root.bar.foreground
     fill: root.hoverFill
     currentFill: root.selectedFill
-    implicitHeight: sourceRow.isEditing ? (srcEditRow.implicitHeight + Style.spacing.xl) : (sourceInner.implicitHeight + Style.spacing.xl)
+    implicitHeight: sourceRow.isEditing ? (srcEditRow.implicitHeight + Style.spacing.xl) : (srcColumn.implicitHeight + Style.spacing.xl)
 
     function startEditing() {
       sourceRow.editBuffer = root.nodeLabel(sourceRow.node)
@@ -1265,84 +1471,158 @@ Panel {
       sourceRow.isEditing = false
     }
 
-    Row {
-      id: sourceInner
+    Column {
+      id: srcColumn
       visible: !sourceRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(6)
       anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
+      spacing: Style.space(2)
 
-      Text {
-        textFormat: Text.PlainText
-        text: root.sourceGlyph(sourceRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.title
-        width: Style.space(22)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
+      Row {
+        id: sourceInner
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item {
+          id: srcSelectArea
+          width: parent.width - srcEditIcon.width - Style.space(8)
+          height: Math.max(srcGlyphText.implicitHeight, srcLabelText.implicitHeight)
+          anchors.verticalCenter: parent.verticalCenter
+
+          Row {
+            anchors.fill: parent
+            spacing: Style.space(8)
+
+            Text {
+              id: srcGlyphText
+              textFormat: Text.PlainText
+              text: root.sourceGlyph(sourceRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              width: Style.space(22)
+              horizontalAlignment: Text.AlignHCenter
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: srcLabelText
+              textFormat: Text.PlainText
+              text: root.nodeLabel(sourceRow.node)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: sourceRow.isActive
+              elide: Text.ElideRight
+              width: parent.width - srcGlyphText.width - srcPct.width - Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            }
+
+            Text {
+              id: srcPct
+              textFormat: Text.PlainText
+              text: Math.round(sourceRow.nodeVolume * 100) + "%"
+              color: Qt.darker(root.bar.foreground, 1.5)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              width: Style.space(36)
+              horizontalAlignment: Text.AlignRight
+              anchors.verticalCenter: parent.verticalCenter
+              opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "input"
+              root.selectedIndex = sourceRow.rowIndex
+            }
+            onClicked: function(mouse) {
+              if (mouse.button === Qt.RightButton) {
+                sourceRow.startEditing()
+              } else {
+                root.setDefaultSource(sourceRow.node)
+              }
+            }
+          }
+        }
+
+        Text {
+          id: srcEditIcon
+          textFormat: Text.PlainText
+          text: "󰏫"
+          color: srcEditArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          width: Style.space(20)
+          horizontalAlignment: Text.AlignHCenter
+          anchors.verticalCenter: parent.verticalCenter
+          opacity: (sourceRow.hasCursor || srcEditArea.containsMouse) ? 1.0 : 0.3
+
+          MouseArea {
+            id: srcEditArea
+            anchors.fill: parent
+            anchors.margins: -Style.space(4)
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) {
+              root.cursorActive = true
+              root.focusSection = "input"
+              root.selectedIndex = sourceRow.rowIndex
+            }
+            onClicked: sourceRow.startEditing()
+          }
+        }
       }
 
-      Text {
-        textFormat: Text.PlainText
-        text: root.nodeLabel(sourceRow.node)
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        font.bold: sourceRow.isActive
-        elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(8) - Style.space(24)
-        anchors.verticalCenter: parent.verticalCenter
-      }
+      PanelSlider {
+        visible: root.expandInputLevels
+        bar: root.bar
+        width: parent.width
+        minimum: 0
+        maximum: 1
+        step: 0.05
+        value: sourceRow.nodeVolume
+        opacity: sourceRow.nodeMuted ? 0.5 : 1.0
+        enabled: !!(sourceRow.node && sourceRow.node.audio)
 
-      Text {
-        textFormat: Text.PlainText
-        text: "󰏫"
-        color: srcEditArea.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-        width: Style.space(20)
-        horizontalAlignment: Text.AlignHCenter
-        anchors.verticalCenter: parent.verticalCenter
-        opacity: (sourceRow.hasCursor || srcRowMouse.containsMouse || srcEditArea.containsMouse) ? 1.0 : 0.3
-
-        MouseArea {
-          id: srcEditArea
-          anchors.fill: parent
-          anchors.margins: -Style.space(4)
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: sourceRow.startEditing()
+        onMoved: function(v) {
+          if (sourceRow.node && sourceRow.node.audio) sourceRow.node.audio.volume = v
+        }
+        onRightClicked: {
+          if (sourceRow.node && sourceRow.node.audio)
+            sourceRow.node.audio.muted = !sourceRow.node.audio.muted
         }
       }
     }
 
     MouseArea {
-      id: srcRowMouse
       visible: !sourceRow.isEditing
       anchors.fill: parent
       hoverEnabled: true
-      acceptedButtons: Qt.LeftButton | Qt.RightButton
-      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.NoButton
+      propagateComposedEvents: true
       onContainsMouseChanged: if (containsMouse) {
         root.cursorActive = true
         root.focusSection = "input"
         root.selectedIndex = sourceRow.rowIndex
       }
-      onClicked: function(mouse) {
-        if (mouse.button === Qt.RightButton) {
-          sourceRow.startEditing()
-        } else {
-          root.setDefaultSource(sourceRow.node)
-        }
-      }
     }
 
     Row {
       id: srcEditRow
+      z: 10
       visible: sourceRow.isEditing
       anchors.left: parent.left
       anchors.right: parent.right
