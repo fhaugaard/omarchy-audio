@@ -303,6 +303,23 @@ function streamRepresentsPlayer(node, player, players, streams) {
   return streamRepresentsMprisPlayer(streamLabel(node, players, streams), playerLabel)
 }
 
+function streamGlyph(node, players) {
+  if (!node) return "󰓃"
+  var label = (streamLabel(node, players, []) || rawStreamLabel(node) || "").toLowerCase()
+  var p = nodeProps(node)
+  var bin = String(p["application.process.binary"] || "").toLowerCase()
+  var full = label + " " + bin
+
+  if (full.indexOf("spotify") !== -1) return "󰓇"
+  if (full.indexOf("discord") !== -1 || full.indexOf("vesktop") !== -1 || full.indexOf("webcord") !== -1) return "󰙯"
+  if (full.indexOf("firefox") !== -1 || full.indexOf("zen") !== -1 || full.indexOf("librewolf") !== -1) return "󰈹"
+  if (full.indexOf("chrome") !== -1 || full.indexOf("chromium") !== -1 || full.indexOf("brave") !== -1) return "󰊯"
+  if (full.indexOf("vlc") !== -1 || full.indexOf("mpv") !== -1 || full.indexOf("celluloid") !== -1) return "󰕼"
+  if (full.indexOf("game") !== -1 || full.indexOf("steam") !== -1 || full.indexOf("retroarch") !== -1) return "󰊗"
+  if (full.indexOf("cliamp") !== -1 || full.indexOf("music") !== -1 || full.indexOf("amberol") !== -1) return "󰎆"
+  return "󰓃"
+}
+
 function streamIsLinkedToSink(streamNode, sinkNode, streamLinks) {
   if (!streamNode || !sinkNode || !streamLinks) return false
   var streamName = String(streamNode.name || "")
@@ -314,24 +331,13 @@ function streamIsLinkedToSink(streamNode, sinkNode, streamLinks) {
   for (var k = 0; k < matchKeys.length; k++) {
     var key = matchKeys[k]
     if (!key) continue
-    var list = streamLinks[key] || []
-    for (var i = 0; i < list.length; i++) {
-      if (list[i] === sinkName || list[i].indexOf(sinkName) !== -1 || sinkName.indexOf(list[i]) !== -1)
-        return true
-    }
-  }
-
-  for (var mapKey in streamLinks) {
-    var keyLower = mapKey.toLowerCase()
-    if ((streamName && keyLower.indexOf(streamName.toLowerCase()) !== -1)
-        || (rawName && keyLower.indexOf(rawName.toLowerCase()) !== -1)
-        || (streamName && streamName.toLowerCase().indexOf(keyLower) !== -1)
-        || (rawName && rawName.toLowerCase().indexOf(keyLower) !== -1)) {
-      var targets = streamLinks[mapKey] || []
-      for (var j = 0; j < targets.length; j++) {
-        if (targets[j] === sinkName || targets[j].indexOf(sinkName) !== -1 || sinkName.indexOf(targets[j]) !== -1)
+    if (streamLinks.hasOwnProperty(key)) {
+      var list = streamLinks[key] || []
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] === sinkName || list[i].indexOf(sinkName) !== -1 || sinkName.indexOf(list[i]) !== -1)
           return true
       }
+      return false
     }
   }
 
@@ -366,6 +372,7 @@ if (typeof module !== "undefined") {
     matchingMprisStreamLabel: matchingMprisStreamLabel,
     unmatchedMprisStreamLabel: unmatchedMprisStreamLabel,
     streamLabel: streamLabel,
+    streamGlyph: streamGlyph,
     streamRepresentsPlayer: streamRepresentsPlayer,
     streamIsLinkedToSink: streamIsLinkedToSink
   }

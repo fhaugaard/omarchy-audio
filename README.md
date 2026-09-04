@@ -27,13 +27,15 @@ This plugin extends Omarchy's native `omarchy.audio` bar widget with **direct in
 - **DSP & Tuning Sink Awareness**: Correctly resolves physical devices through virtual speaker tunings, EasyEffects, and DSP sinks.
 
 ### 🔀 Multi-Device Output Routing & Simultaneous Playback
-- **Per-Application Routing**: Route individual applications (Discord, Spotify, games, web browsers) to any connected output device via the expandable **󰌹 Route** matrix.
-- **Simultaneous Output**: One-click toggle to play audio through all connected outputs simultaneously via native `module-combine-sink`.
+- **Per-Application Routing**: Route individual applications (Discord, Spotify, games, web browsers) to any connected output device via the expandable **󰌹 Route** matrix with instantaneous optimistic updates.
+- **Simultaneous Output**: One-click toggle to play audio through all connected outputs simultaneously via native `module-combine-sink` with unity volume preservation and independent per-device fine-tuning.
 
-### 🎛️ Per-Application Stream Mixer
-- **Application Level Sliders**: Control volume individually for active apps (browsers, music players, games, Discord).
-- **Volume Boost**: Boost audio up to **150%** for quiet applications.
-- **MPRIS Integration**: Intelligent player matching correlates generic stream identifiers (e.g., `audio-src`, Chromium streams) to active media players like Spotify and ALSA apps.
+### 🎛️ Top-Aligned Playback Sources & Solo Mode
+- **Collapsible by Default with Inline Chiron**: Features a sleek, continuous animated marquee ticker directly on the header line displaying active sources (`Spotify, Firefox, Discord, ...`), and expands on click to reveal full cards.
+- **Horizontal Card Deck**: Active application streams are elevated to the top of the panel in a horizontal card carousel with dedicated mouse wheel, touchpad, and keyboard horizontal scrolling.
+- **Per-Stream Solo Mode**: Isolate any application's audio with the **󰓃 Solo** toggle; all other streams are muted instantly, with previous mute states restored when Solo is released or when the application exits.
+- **Dedicated Stream Controls**: Discrete Mute (`󰝟` / `󰕾`), Solo (`󰓃`), Volume Slider with up to **150% Volume Boost**, and expandable **󰌹 Route** output selector on every card.
+- **Smart App Glyphs**: Automatically renders recognizable branding glyphs for Spotify (`󰓇`), Discord (`󰙯`), Firefox/Zen (`󰈹`), Chrome (`󰊯`), VLC (`󰕼`), games (`󰊗`), and music players (`󰎆`).
 
 ### ⚡ Hero Controls & Bar Integration
 - **Hero Mute Switch**: Master power switch on the header to instantly mute/unmute all audible channels.
@@ -48,11 +50,12 @@ The audio panel features complete keyboard accessibility with Vim-friendly bindi
 
 | Key | Action |
 |---|---|
-| <kbd>j</kbd> / <kbd>↓</kbd> | Move focus downward (header → master → device rows → application streams) |
+| <kbd>j</kbd> / <kbd>↓</kbd> | Move focus downward (header → playback stream cards → master → device rows) |
 | <kbd>k</kbd> / <kbd>↑</kbd> | Move focus upward |
 | <kbd>h</kbd> / <kbd>←</kbd> | Decrease volume by 5% on the focused item |
 | <kbd>l</kbd> / <kbd>→</kbd> | Increase volume by 5% on the focused item |
 | <kbd>m</kbd> / <kbd>M</kbd> | Toggle mute on the focused item (master slider, device, or stream) |
+| <kbd>s</kbd> / <kbd>S</kbd> | Toggle Solo mode on the focused stream card |
 | <kbd>Enter</kbd> / <kbd>Space</kbd> | Select active device / toggle master mute |
 | <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> | Switch to next / previous panel |
 | <kbd>Esc</kbd> | Cancel inline rename / close panel |

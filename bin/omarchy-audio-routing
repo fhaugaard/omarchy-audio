@@ -58,9 +58,8 @@ except Exception:
     sinks_raw = []
 
 try:
-    res_mods = subprocess.run(["pactl", "--format=json", "list", "modules"], capture_output=True, text=True)
-    mods = json.loads(res_mods.stdout)
-    is_simultaneous_active = any(m.get("name") == "module-combine-sink" and "omarchy_combined" in m.get("argument", "") for m in mods)
+    res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
+    is_simultaneous_active = any("module-combine-sink" in line and "omarchy_combined" in line for line in res_mods.stdout.splitlines())
 except Exception:
     is_simultaneous_active = False
 
@@ -133,7 +132,7 @@ import subprocess, json
 
 try:
     res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-    inputs = json.loads(res_inputs.stdout)
+    inputs = json.loads(res_inputs.stdout) if res_inputs.stdout else []
 except Exception:
     inputs = []
 
@@ -154,13 +153,11 @@ for inp in inputs:
     media = props.get("media.name") or ""
     inp_id = str(inp.get("index"))
     obj_id = str(props.get("object.id") or "")
+    serial = str(props.get("object.serial") or "")
     
-    for key in [app, node_name, media, inp_id, obj_id]:
+    for key in [app, node_name, media, inp_id, obj_id, serial]:
         if key:
-            if key not in stream_links:
-                stream_links[key] = []
-            if sink_name and sink_name not in stream_links[key]:
-                stream_links[key].append(sink_name)
+            stream_links[key] = [sink_name]
 
 print(json.dumps(stream_links, indent=2))
 '
@@ -187,13 +184,13 @@ sink_id = sys.argv[4] if len(sys.argv) > 4 else ""
 
 try:
     res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-    inputs = json.loads(res_inputs.stdout)
+    inputs = json.loads(res_inputs.stdout) if res_inputs.stdout else []
 except Exception:
     inputs = []
 
 try:
     res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
-    sinks = json.loads(res_sinks.stdout)
+    sinks = json.loads(res_sinks.stdout) if res_sinks.stdout else []
 except Exception:
     sinks = []
 
@@ -201,7 +198,7 @@ sink_names = [s.get("name") for s in sinks]
 resolved_sink = sink_arg
 if sink_arg not in sink_names:
     for s in sinks:
-        if str(s.get("index")) == sink_arg or str(s.get("properties", {}).get("object.id")) == sink_id or str(s.get("properties", {}).get("node.id")) == sink_id:
+        if str(s.get("index")) == sink_arg or str(s.get("properties", {}).get("object.id")) == sink_id or str(s.get("properties", {}).get("node.id")) == sink_id or str(s.get("name", "")) == sink_arg:
             resolved_sink = s.get("name")
             break
 
@@ -209,59 +206,114 @@ for inp in inputs:
     props = inp.get("properties", {})
     idx = str(inp.get("index"))
     obj_id = str(props.get("object.id") or "")
+    serial = str(props.get("object.serial") or "")
     app = (props.get("application.name") or "").lower()
     node = (props.get("node.name") or "").lower()
     media = (props.get("media.name") or "").lower()
 
     is_match = False
-    if stream_arg and (stream_arg == idx or stream_arg == obj_id):
+    if stream_arg and (stream_arg == idx or stream_arg == obj_id or stream_arg == serial):
         is_match = True
-    elif stream_arg and (stream_arg.lower() in app or stream_arg.lower() in node or stream_arg.lower() in media):
-        is_match = True
-    elif stream_name and (stream_name.lower() in app or stream_name.lower() in node or stream_name.lower() in media or app in stream_name.lower()):
+    elif stream_name and (stream_name.lower() in [app, node, media] or app in stream_name.lower()):
         is_match = True
 
     if is_match:
-        subprocess.run(["pactl", "move-sink-input", idx, resolved_sink])
+        subprocess.run(["pactl", "move-sink-input", idx, resolved_sink], capture_output=True)
 ' "$stream_arg" "$sink_arg" "$stream_name" "$sink_id"
     ;;
 
   toggle-simultaneous)
+    target_sink_arg="${1:-}"
     python3 -c '
-import subprocess, json
+import subprocess, json, sys
 
-res_mods = subprocess.run(["pactl", "--format=json", "list", "modules"], capture_output=True, text=True)
-mods = json.loads(res_mods.stdout)
-comb_mod = None
-for m in mods:
-    if m.get("name") == "module-combine-sink" and "omarchy_combined" in m.get("argument", ""):
-        comb_mod = m.get("index")
+target_sink_arg = sys.argv[1] if len(sys.argv) > 1 else ""
 
-if comb_mod:
+res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
+comb_mods = []
+for line in res_mods.stdout.splitlines():
+    parts = line.split("\t")
+    if len(parts) >= 2 and "module-combine-sink" in parts[1] and "omarchy_combined" in line:
+        comb_mods.append(parts[0].strip())
+
+if comb_mods:
     print("Disabling simultaneous playback...")
-    subprocess.run(["pactl", "unload-module", str(comb_mod)])
     res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
-    sinks = [s.get("name") for s in json.loads(res_sinks.stdout) if "omarchy_combined" not in s.get("name", "")]
-    if sinks:
-        preferred = next((s for s in sinks if "analog-stereo" in s or "pro-output-0" in s), sinks[0])
-        subprocess.run(["pactl", "set-default-sink", preferred])
+    sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
+    physical_sinks = [s for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+
+    sink_vols = {}
+    for s in physical_sinks:
+        v_pct = s.get("volume", {}).get("front-left", {}).get("value_percent")
+        if v_pct:
+            sink_vols[s.get("name")] = v_pct
+
+    for m in comb_mods:
+        subprocess.run(["pactl", "unload-module", str(m)])
+
+    selected_sink = None
+    if target_sink_arg:
+        for s in physical_sinks:
+            if s.get("name") == target_sink_arg or str(s.get("index")) == target_sink_arg:
+                selected_sink = s
+                break
+    if not selected_sink:
+        # Prefer an unmuted physical sink first
+        unmuted_sinks = [s for s in physical_sinks if not s.get("mute", False)]
+        if unmuted_sinks:
+            selected_sink = unmuted_sinks[0]
+        elif physical_sinks:
+            selected_sink = physical_sinks[0]
+
+    if selected_sink:
+        sink_name = selected_sink.get("name")
+        subprocess.run(["pactl", "set-default-sink", sink_name])
+        subprocess.run(["pactl", "set-sink-mute", sink_name, "0"])
         res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-        for inp in json.loads(res_inputs.stdout):
-            subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), preferred])
+        try:
+            for inp in json.loads(res_inputs.stdout):
+                props = inp.get("properties", {})
+                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
+                    continue
+                subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), sink_name], capture_output=True)
+        except Exception:
+            pass
+    
+    for sname, svol in sink_vols.items():
+        subprocess.run(["pactl", "set-sink-volume", sname, svol], capture_output=True)
+
 else:
     print("Enabling simultaneous playback...")
     res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
-    sinks_data = json.loads(res_sinks.stdout)
-    physical_sinks = [s.get("name") for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+    sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
+    physical_sinks = [s for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+
+    sink_vols = {}
+    for s in physical_sinks:
+        v_pct = s.get("volume", {}).get("front-left", {}).get("value_percent")
+        if v_pct:
+            sink_vols[s.get("name")] = v_pct
 
     if len(physical_sinks) >= 2:
-        slaves = ",".join(physical_sinks)
+        slaves = ",".join([s.get("name") for s in physical_sinks])
         res = subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves}", "sink_properties=device.description=Simultaneous\\ Output\\ (All\\ Devices)"], capture_output=True, text=True)
         subprocess.run(["pactl", "set-default-sink", "omarchy_combined"])
+        subprocess.run(["pactl", "set-sink-volume", "omarchy_combined", "100%"])
+        subprocess.run(["pactl", "set-sink-mute", "omarchy_combined", "0"])
+
+        for sname, svol in sink_vols.items():
+            subprocess.run(["pactl", "set-sink-volume", sname, svol], capture_output=True)
+
         res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-        for inp in json.loads(res_inputs.stdout):
-            subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), "omarchy_combined"])
-'
+        try:
+            for inp in json.loads(res_inputs.stdout):
+                props = inp.get("properties", {})
+                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
+                    continue
+                subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), "omarchy_combined"], capture_output=True)
+        except Exception:
+            pass
+' "$target_sink_arg"
     ;;
 
   set-sink-port)
