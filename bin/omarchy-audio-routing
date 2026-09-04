@@ -61,6 +61,8 @@ except Exception:
 
 is_simultaneous_active = False
 simultaneous_slaves = []
+combined_volume = 1.0
+combined_muted = False
 try:
     res_mods = subprocess.run(["pactl", "--format=json", "list", "modules"], capture_output=True, text=True)
     mods = json.loads(res_mods.stdout)
@@ -73,6 +75,14 @@ try:
                 simultaneous_slaves = [s.strip() for s in match.group(1).split(",") if s.strip()]
 except Exception:
     pass
+
+for sk in sinks_raw:
+    if "omarchy_combined" in sk.get("name", ""):
+        v_obj = sk.get("volume", {}).get("front-left", {})
+        if v_obj and "value" in v_obj:
+            combined_volume = round(v_obj["value"] / 65536.0, 4)
+        combined_muted = bool(sk.get("mute", False))
+        break
 
 cards = []
 for c in cards_raw:
@@ -131,7 +141,9 @@ for c in cards_raw:
         "profiles": profiles,
         "cardSinks": card_sinks,
         "isSimultaneous": is_simultaneous_active,
-        "simultaneousSlaves": simultaneous_slaves
+        "simultaneousSlaves": simultaneous_slaves,
+        "combinedVolume": combined_volume,
+        "combinedMuted": combined_muted
     })
 
 print(json.dumps(cards, indent=2))
@@ -171,18 +183,53 @@ for a in raw_args:
         if clean and clean not in target_sinks and "omarchy_combined" not in clean:
             target_sinks.append(clean)
 
-# 1. Capture playing MPRIS players before any node teardown
-playing_players = []
-try:
-    res_players = subprocess.run(["playerctl", "-l"], capture_output=True, text=True)
-    for p in res_players.stdout.splitlines():
-        p = p.strip()
-        if p:
-            st = subprocess.run(["playerctl", "-p", p, "status"], capture_output=True, text=True)
-            if "Playing" in st.stdout:
-                playing_players.append(p)
-except Exception:
-    pass
+def wait_for_sink_presence(sink_name, present=True, timeout=0.8):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        s_list = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True).stdout
+        if (sink_name in s_list) == present:
+            return True
+        time.sleep(0.01)
+    return False
+
+def get_active_app_stream_ids():
+    res = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+    inputs = json.loads(res.stdout) if res.stdout else []
+    app_inputs = []
+    for inp in inputs:
+        props = inp.get("properties", {})
+        name = str(props.get("node.name", "")).lower()
+        media = str(props.get("media.name", "")).lower()
+        if props.get("module-combine-sink.sink") or "combine" in name or "combine" in media:
+            continue
+        app_inputs.append(str(inp.get("index")))
+    return app_inputs
+
+def wait_for_streams_migration(stream_indices, target_sink_name, timeout=0.8):
+    if not stream_indices:
+        return True
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        res_i = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+        inps = json.loads(res_i.stdout) if res_i.stdout else []
+        res_s = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
+        sinks = json.loads(res_s.stdout) if res_s.stdout else []
+        target_idx = None
+        for s in sinks:
+            if target_sink_name in s.get("name", ""):
+                target_idx = s.get("index")
+                break
+        if target_idx is not None:
+            all_moved = True
+            for idx in stream_indices:
+                matches = [i for i in inps if str(i.get("index")) == idx]
+                if not matches or matches[0].get("sink") != target_idx:
+                    all_moved = False
+                    break
+            if all_moved:
+                return True
+        time.sleep(0.01)
+    return False
 
 res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
 comb_mods = []
@@ -195,7 +242,25 @@ res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_
 sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
 physical_sinks = [s.get("name") for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
 
-# Resolve sink names if indices or IDs were given
+# Capture existing combine sink volume & mute if active to preserve across reloads
+prev_vol_pct = None
+prev_muted = False
+for s in sinks_data:
+    if "omarchy_combined" in s.get("name", ""):
+        v_obj = s.get("volume", {}).get("front-left", {})
+        if v_obj and "value_percent" in v_obj:
+            prev_vol_pct = v_obj["value_percent"]
+        prev_muted = bool(s.get("mute", False))
+        break
+
+def is_preferred_sink(name):
+    n = name.lower()
+    return "pro-output" in n or "analog-stereo" in n or "speaker" in n or "hdmi" in n
+
+preferred_sinks = [s for s in physical_sinks if is_preferred_sink(s) and "direct" not in s.lower()]
+safe_physical = preferred_sinks[0] if preferred_sinks else (physical_sinks[0] if physical_sinks else None)
+
+# Resolve requested slaves
 resolved_slaves = []
 for target in target_sinks:
     if target in physical_sinks:
@@ -208,76 +273,58 @@ for target in target_sinks:
                     resolved_slaves.append(name)
                     break
 
-# 2. Seamless handover: Move active streams to a safe physical sink BEFORE unloading old combine module
-safe_fallback = resolved_slaves[0] if resolved_slaves else (physical_sinks[0] if physical_sinks else None)
-if comb_mods and safe_fallback:
-    res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-    try:
-        for inp in json.loads(res_inputs.stdout):
-            props = inp.get("properties", {})
-            if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                continue
-            subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), safe_fallback], capture_output=True)
-    except Exception:
-        pass
+# Fallback sink for safe handover
+fallback_sink = resolved_slaves[0] if resolved_slaves else safe_physical
 
-# 3. Unload old combined sink modules
+# 1. Seamless handover: Migrate active streams to fallback physical sink before dismantling old combine module
+if comb_mods and fallback_sink:
+    app_streams = get_active_app_stream_ids()
+    if app_streams:
+        subprocess.run(["pactl", "set-default-sink", fallback_sink], capture_output=True)
+        for idx in app_streams:
+            subprocess.run(["pactl", "move-sink-input", idx, fallback_sink], capture_output=True)
+            subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+        wait_for_streams_migration(app_streams, fallback_sink)
+
+# 2. Unload old combine modules and wait for teardown to finish
 for m in comb_mods:
     subprocess.run(["pactl", "unload-module", str(m)])
+if comb_mods:
+    wait_for_sink_presence("omarchy_combined", present=False)
 
-# 4. Provision new state
+# 3. Provision new state
 if len(resolved_slaves) >= 2:
     slaves_str = ",".join(resolved_slaves)
     print(f"Enabling custom multi-output playback across: {slaves_str}")
     subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves_str}", "sink_properties=device.description=Multi-Output"])
+    wait_for_sink_presence("omarchy_combined", present=True)
     subprocess.run(["pactl", "set-default-sink", "omarchy_combined"])
     
-    # Ensure physical slaves are unmuted
+    if prev_vol_pct:
+        subprocess.run(["pactl", "set-sink-volume", "omarchy_combined", prev_vol_pct], capture_output=True)
+        subprocess.run(["pactl", "set-sink-mute", "omarchy_combined", "1" if prev_muted else "0"], capture_output=True)
+    
     for slave in resolved_slaves:
         subprocess.run(["pactl", "set-sink-mute", slave, "0"], capture_output=True)
-    
-    res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-    try:
-        for inp in json.loads(res_inputs.stdout):
-            idx = str(inp.get("index"))
-            props = inp.get("properties", {})
-            if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                continue
+        
+    app_streams = get_active_app_stream_ids()
+    if app_streams:
+        for idx in app_streams:
             subprocess.run(["pactl", "move-sink-input", idx, "omarchy_combined"], capture_output=True)
             subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
-    except Exception:
-        pass
+        wait_for_streams_migration(app_streams, "omarchy_combined")
 else:
-    target = None
-    if resolved_slaves:
-        target = resolved_slaves[0]
-    else:
-        preferred = [s for s in physical_sinks if "pro-output-0" in s or "analog-stereo" in s or "hdmi" in s or "speaker" in s]
-        if preferred:
-            target = preferred[0]
-        elif physical_sinks:
-            target = physical_sinks[0]
+    target = resolved_slaves[0] if resolved_slaves else safe_physical
     if target:
         print(f"Setting single default output: {target}")
         subprocess.run(["pactl", "set-default-sink", target])
         subprocess.run(["pactl", "set-sink-mute", target, "0"])
-        res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-        try:
-            for inp in json.loads(res_inputs.stdout):
-                idx = str(inp.get("index"))
-                props = inp.get("properties", {})
-                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                    continue
+        app_streams = get_active_app_stream_ids()
+        if app_streams:
+            for idx in app_streams:
                 subprocess.run(["pactl", "move-sink-input", idx, target], capture_output=True)
                 subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
-        except Exception:
-            pass
-
-# 5. Auto-resume any playing players if they were paused during graph migration
-time.sleep(0.05)
-if playing_players:
-    for p in playing_players:
-        subprocess.run(["playerctl", "-p", p, "play"], capture_output=True)
+            wait_for_streams_migration(app_streams, target)
 ' "$@"
     ;;
 
@@ -386,17 +433,53 @@ import subprocess, json, sys, time
 
 target_sink_arg = sys.argv[1] if len(sys.argv) > 1 else ""
 
-playing_players = []
-try:
-    res_players = subprocess.run(["playerctl", "-l"], capture_output=True, text=True)
-    for p in res_players.stdout.splitlines():
-        p = p.strip()
-        if p:
-            st = subprocess.run(["playerctl", "-p", p, "status"], capture_output=True, text=True)
-            if "Playing" in st.stdout:
-                playing_players.append(p)
-except Exception:
-    pass
+def wait_for_sink_presence(sink_name, present=True, timeout=0.8):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        s_list = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True).stdout
+        if (sink_name in s_list) == present:
+            return True
+        time.sleep(0.01)
+    return False
+
+def get_active_app_stream_ids():
+    res = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+    inputs = json.loads(res.stdout) if res.stdout else []
+    app_inputs = []
+    for inp in inputs:
+        props = inp.get("properties", {})
+        name = str(props.get("node.name", "")).lower()
+        media = str(props.get("media.name", "")).lower()
+        if props.get("module-combine-sink.sink") or "combine" in name or "combine" in media:
+            continue
+        app_inputs.append(str(inp.get("index")))
+    return app_inputs
+
+def wait_for_streams_migration(stream_indices, target_sink_name, timeout=0.8):
+    if not stream_indices:
+        return True
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        res_i = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+        inps = json.loads(res_i.stdout) if res_i.stdout else []
+        res_s = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
+        sinks = json.loads(res_s.stdout) if res_s.stdout else []
+        target_idx = None
+        for s in sinks:
+            if target_sink_name in s.get("name", ""):
+                target_idx = s.get("index")
+                break
+        if target_idx is not None:
+            all_moved = True
+            for idx in stream_indices:
+                matches = [i for i in inps if str(i.get("index")) == idx]
+                if not matches or matches[0].get("sink") != target_idx:
+                    all_moved = False
+                    break
+            if all_moved:
+                return True
+        time.sleep(0.01)
+    return False
 
 res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
 comb_mods = []
@@ -407,69 +490,60 @@ for line in res_mods.stdout.splitlines():
 
 res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
 sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
-physical_sinks = [s for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+physical_sinks = [s.get("name") for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+
+def is_preferred_sink(name):
+    n = name.lower()
+    return "pro-output" in n or "analog-stereo" in n or "speaker" in n or "hdmi" in n
+
+preferred_sinks = [s for s in physical_sinks if is_preferred_sink(s) and "direct" not in s.lower()]
+safe_physical = preferred_sinks[0] if preferred_sinks else (physical_sinks[0] if physical_sinks else None)
 
 if comb_mods:
     print("Disabling simultaneous playback...")
-    selected_sink = None
-    if target_sink_arg:
-        for s in physical_sinks:
-            if s.get("name") == target_sink_arg or str(s.get("index")) == target_sink_arg:
-                selected_sink = s
-                break
-    if not selected_sink:
-        unmuted_sinks = [s for s in physical_sinks if not s.get("mute", False)]
-        if unmuted_sinks:
-            selected_sink = unmuted_sinks[0]
-        elif physical_sinks:
-            selected_sink = physical_sinks[0]
-
-    sink_name = selected_sink.get("name") if selected_sink else None
+    target = target_sink_arg if (target_sink_arg and target_sink_arg in physical_sinks) else safe_physical
     
-    # Move streams first before unloading
-    if sink_name:
-        res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-        try:
-            for inp in json.loads(res_inputs.stdout):
-                props = inp.get("properties", {})
-                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                    continue
-                subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), sink_name], capture_output=True)
-                subprocess.run(["pactl", "set-sink-input-mute", str(inp.get("index")), "0"], capture_output=True)
-        except Exception:
-            pass
-
+    app_streams = get_active_app_stream_ids()
+    if app_streams and target:
+        subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
+        for idx in app_streams:
+            subprocess.run(["pactl", "move-sink-input", idx, target], capture_output=True)
+            subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+        wait_for_streams_migration(app_streams, target)
+        
     for m in comb_mods:
         subprocess.run(["pactl", "unload-module", str(m)])
-
-    if sink_name:
-        subprocess.run(["pactl", "set-default-sink", sink_name])
-        subprocess.run(["pactl", "set-sink-mute", sink_name, "0"])
+    wait_for_sink_presence("omarchy_combined", present=False)
+    
+    if target:
+        subprocess.run(["pactl", "set-default-sink", target])
+        subprocess.run(["pactl", "set-sink-mute", target, "0"])
 else:
     print("Enabling simultaneous playback across all devices...")
-    if len(physical_sinks) >= 2:
-        slaves = ",".join([s.get("name") for s in physical_sinks])
-        res = subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves}", "sink_properties=device.description=Multi-Output\\ (All\\ Devices)"], capture_output=True, text=True)
+    active_targets = preferred_sinks if len(preferred_sinks) >= 2 else physical_sinks
+    if len(active_targets) >= 2:
+        fallback = active_targets[0]
+        app_streams = get_active_app_stream_ids()
+        if app_streams:
+            subprocess.run(["pactl", "set-default-sink", fallback], capture_output=True)
+            for idx in app_streams:
+                subprocess.run(["pactl", "move-sink-input", idx, fallback], capture_output=True)
+                subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+            wait_for_streams_migration(app_streams, fallback)
+            
+        slaves_str = ",".join(active_targets)
+        subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves_str}", "sink_properties=device.description=Multi-Output\\ (All\\ Devices)"])
+        wait_for_sink_presence("omarchy_combined", present=True)
         subprocess.run(["pactl", "set-default-sink", "omarchy_combined"])
         
-        for s in physical_sinks:
-            subprocess.run(["pactl", "set-sink-mute", s.get("name"), "0"], capture_output=True)
+        for s in active_targets:
+            subprocess.run(["pactl", "set-sink-mute", s, "0"], capture_output=True)
             
-        res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-        try:
-            for inp in json.loads(res_inputs.stdout):
-                props = inp.get("properties", {})
-                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                    continue
-                subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), "omarchy_combined"], capture_output=True)
-                subprocess.run(["pactl", "set-sink-input-mute", str(inp.get("index")), "0"], capture_output=True)
-        except Exception:
-            pass
-
-time.sleep(0.05)
-if playing_players:
-    for p in playing_players:
-        subprocess.run(["playerctl", "-p", p, "play"], capture_output=True)
+        if app_streams:
+            for idx in app_streams:
+                subprocess.run(["pactl", "move-sink-input", idx, "omarchy_combined"], capture_output=True)
+                subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+            wait_for_streams_migration(app_streams, "omarchy_combined")
 ' "$target_sink_arg"
     ;;
 

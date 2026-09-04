@@ -70,6 +70,9 @@ Panel {
   property var soundCards: []
   property var simultaneousSlaves: []
   property double lastSimultaneousUserAction: 0
+  property double lastMasterVolumeUserAction: 0
+  property real multiOutputMasterVolume: 1.0
+  property bool multiOutputMasterMuted: false
   property bool expandMultiOutput: false
   readonly property bool showMultiOutputChips: root.expandMultiOutput || root.isSimultaneousActive
   readonly property bool isSimultaneousActive: {
@@ -218,23 +221,13 @@ Panel {
 
   readonly property real outputVolume: {
     if (root.isSimultaneousActive) {
-      for (var i = 0; i < displayAudioSinks.length; i++) {
-        var s = displayAudioSinks[i]
-        if (s && s.audio && Model.isSinkInSimultaneous(s, root.simultaneousSlaves)) {
-          return s.audio.volume
-        }
-      }
+      return root.multiOutputMasterVolume
     }
     return volumeSink && volumeSink.audio ? volumeSink.audio.volume : (sink && sink.audio ? sink.audio.volume : 0)
   }
   readonly property bool outputMuted: {
     if (root.isSimultaneousActive) {
-      for (var i = 0; i < displayAudioSinks.length; i++) {
-        var sm = displayAudioSinks[i]
-        if (sm && sm.audio && Model.isSinkInSimultaneous(sm, root.simultaneousSlaves)) {
-          return sm.audio.muted
-        }
-      }
+      return root.multiOutputMasterMuted
     }
     return volumeSink && volumeSink.audio ? volumeSink.audio.muted : (sink && sink.audio ? sink.audio.muted : false)
   }
@@ -512,12 +505,8 @@ Panel {
   function setOutputVolume(v) {
     var volume = Math.max(0, Math.min(1, v))
     if (root.isSimultaneousActive) {
-      for (var i = 0; i < displayAudioSinks.length; i++) {
-        var sNode = displayAudioSinks[i]
-        if (sNode && sNode.audio && Model.isSinkInSimultaneous(sNode, root.simultaneousSlaves)) {
-          sNode.audio.volume = volume
-        }
-      }
+      root.lastMasterVolumeUserAction = Date.now()
+      root.multiOutputMasterVolume = volume
       Quickshell.execDetached(["pactl", "set-sink-volume", "omarchy_combined", Math.round(volume * 100) + "%"])
       return volume
     }
@@ -547,13 +536,9 @@ Panel {
 
   function toggleOutputMute() {
     if (root.isSimultaneousActive) {
-      var nextMute = !root.outputMuted
-      for (var i = 0; i < displayAudioSinks.length; i++) {
-        var sNode = displayAudioSinks[i]
-        if (sNode && sNode.audio && Model.isSinkInSimultaneous(sNode, root.simultaneousSlaves)) {
-          sNode.audio.muted = nextMute
-        }
-      }
+      root.lastMasterVolumeUserAction = Date.now()
+      var nextMute = !root.multiOutputMasterMuted
+      root.multiOutputMasterMuted = nextMute
       Quickshell.execDetached(["pactl", "set-sink-mute", "omarchy_combined", nextMute ? "1" : "0"])
       return
     }
@@ -576,8 +561,10 @@ Panel {
     var sinkName = String(node.name || "")
     var sinkId = String(node.id !== undefined ? node.id : "")
     if (root.isSimultaneousActive) {
-      root.simultaneousSlaves = []
+      root.simultaneousSlaves = [sinkName]
       Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", sinkName])
+    } else {
+      root.simultaneousSlaves = [sinkName]
     }
     Pipewire.preferredDefaultAudioSink = node
     if (node.audio) node.audio.muted = false
@@ -716,19 +703,24 @@ Panel {
     root.lastSimultaneousUserAction = Date.now()
     root.expandMultiOutput = true
     var name = String(sinkNode.name || "")
-    var current = (root.simultaneousSlaves || []).slice()
+    
+    var current = []
+    if (root.isSimultaneousActive) {
+      current = (root.simultaneousSlaves || []).slice()
+    } else {
+      var defaultName = (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) ? String(root.sink.name || "") : ""
+      if (defaultName) current = [defaultName]
+      else if (root.simultaneousSlaves && root.simultaneousSlaves.length > 0) current = root.simultaneousSlaves.slice()
+    }
+
     var idx = current.indexOf(name)
     if (idx >= 0) {
+      if (current.length <= 1) {
+        return
+      }
       current.splice(idx, 1)
     } else {
       current.push(name)
-    }
-
-    if (current.length === 1 && !root.isSimultaneousActive && root.sink) {
-      var defaultName = String(root.sink.name || "")
-      if (defaultName && defaultName !== name && current.indexOf(defaultName) < 0 && defaultName.indexOf("omarchy_combined") < 0) {
-        current.unshift(defaultName)
-      }
     }
 
     root.simultaneousSlaves = current
@@ -806,7 +798,24 @@ Panel {
               break
             }
           }
-          root.simultaneousSlaves = slaves
+          if (slaves.length > 0) {
+            root.simultaneousSlaves = slaves
+          } else if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) {
+            root.simultaneousSlaves = [String(root.sink.name)]
+          }
+        }
+        if (Date.now() - root.lastMasterVolumeUserAction > 1500) {
+          for (var j = 0; j < root.soundCards.length; j++) {
+            if (root.soundCards[j] && root.soundCards[j].isSimultaneous) {
+              if (root.soundCards[j].combinedVolume !== undefined) {
+                root.multiOutputMasterVolume = root.soundCards[j].combinedVolume
+              }
+              if (root.soundCards[j].combinedMuted !== undefined) {
+                root.multiOutputMasterMuted = root.soundCards[j].combinedMuted
+              }
+              break
+            }
+          }
         }
       }
     }
@@ -1382,6 +1391,7 @@ Panel {
                           cursorShape: Qt.PointingHandCursor
                           onClicked: {
                             var target = (root.sink && !root.isSimultaneousActive) ? String(root.sink.name || "") : (root.displayAudioSinks.length > 0 ? String(root.displayAudioSinks[0].name || "") : "")
+                            root.simultaneousSlaves = target ? [target] : []
                             Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", target])
                             Qt.callLater(function() {
                               refreshRoutingState()
@@ -1441,7 +1451,16 @@ Panel {
                       Rectangle {
                         id: simulChip
                         required property var modelData
-                        readonly property bool isSelected: Model.isSinkInSimultaneous(simulChip.modelData, root.simultaneousSlaves)
+                        readonly property bool isSelected: {
+                          if (root.isSimultaneousActive) {
+                            return Model.isSinkInSimultaneous(simulChip.modelData, root.simultaneousSlaves)
+                          } else {
+                            if (root.simultaneousSlaves && root.simultaneousSlaves.length > 0 && Model.isSinkInSimultaneous(simulChip.modelData, root.simultaneousSlaves)) {
+                              return true
+                            }
+                            return !!(root.sink && simulChip.modelData && (root.sink.id === simulChip.modelData.id || root.sink.name === simulChip.modelData.name))
+                          }
+                        }
                         width: simulChipContent.implicitWidth + Style.space(12)
                         height: Style.space(22)
                         radius: Math.min(4, Style.cornerRadius)
@@ -1522,7 +1541,7 @@ Panel {
                 step: 0.05
                 value: root.outputVolume
                 opacity: root.outputMuted ? 0.5 : 1.0
-                enabled: !!root.sink
+                enabled: root.isSimultaneousActive || !!root.sink
 
                 onMoved: function(v) { root.setOutputVolume(v) }
                 onRightClicked: root.toggleOutputMute()
