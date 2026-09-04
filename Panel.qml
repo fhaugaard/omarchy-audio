@@ -69,6 +69,7 @@ Panel {
   property bool expandStreams: false
   property var soundCards: []
   property var simultaneousSlaves: []
+  property double lastSimultaneousUserAction: 0
   property bool expandMultiOutput: false
   readonly property bool showMultiOutputChips: root.expandMultiOutput || root.isSimultaneousActive
   readonly property bool isSimultaneousActive: {
@@ -664,6 +665,8 @@ Panel {
 
   function toggleSimultaneousSink(sinkNode) {
     if (!sinkNode) return
+    root.lastSimultaneousUserAction = Date.now()
+    root.expandMultiOutput = true
     var name = String(sinkNode.name || "")
     var current = (root.simultaneousSlaves || []).slice()
     var idx = current.indexOf(name)
@@ -684,8 +687,7 @@ Panel {
     var args = [root.routingBin, "set-simultaneous-sinks"].concat(current)
     Quickshell.execDetached(args)
     Qt.callLater(function() {
-      refreshRoutingState()
-      scheduleDisplayAudioModelRefresh()
+      if (!streamLinksProc.running) streamLinksProc.running = true
     })
   }
 
@@ -748,14 +750,16 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.soundCards = Model.parseCardProfiles(text)
-        var slaves = []
-        for (var i = 0; i < root.soundCards.length; i++) {
-          if (root.soundCards[i] && Array.isArray(root.soundCards[i].simultaneousSlaves) && root.soundCards[i].simultaneousSlaves.length > 0) {
-            slaves = root.soundCards[i].simultaneousSlaves
-            break
+        if (Date.now() - root.lastSimultaneousUserAction > 1500) {
+          var slaves = []
+          for (var i = 0; i < root.soundCards.length; i++) {
+            if (root.soundCards[i] && Array.isArray(root.soundCards[i].simultaneousSlaves) && root.soundCards[i].simultaneousSlaves.length > 0) {
+              slaves = root.soundCards[i].simultaneousSlaves
+              break
+            }
           }
+          root.simultaneousSlaves = slaves
         }
-        root.simultaneousSlaves = slaves
       }
     }
   }
@@ -1231,7 +1235,6 @@ Panel {
 
                 Text {
                   id: outputPercent
-                  visible: !root.isSimultaneousActive
                   textFormat: Text.PlainText
                   text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
                   color: Qt.darker(root.bar.foreground, 1.4)
@@ -1453,7 +1456,6 @@ Panel {
 
             CursorSurface {
               id: outputSliderRow
-              visible: !root.isSimultaneousActive
               width: parent.width
               height: outputSlider.implicitHeight + Style.spacing.controlGap
               hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === -1
