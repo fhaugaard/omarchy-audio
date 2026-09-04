@@ -30,6 +30,9 @@ This plugin extends Omarchy's native `omarchy.audio` bar widget with **direct in
 - **Per-Application Routing**: Route individual applications (Discord, Spotify, games, web browsers) to any connected output device via the expandable **󰌹 Route** matrix with instantaneous optimistic updates.
 - **Custom Multi-Output**: Select any custom subset of connected devices (e.g. Desktop Speakers + Monitor HDMI) or click **"Select all"** to play synchronized audio across chosen outputs simultaneously via PipeWire's native `module-combine-sink` with independent per-device fine-tuning.
 
+> [!NOTE]
+> **Known Behavior**: When selecting more than 2 audio devices or deselecting devices in multi-select mode, active playback audio may pause depending on the sound server and application stream state.
+
 ### 🎛️ Top-Aligned Playback Sources & Solo Mode
 - **Collapsible by Default with Inline Chiron**: Features a sleek, continuous animated marquee ticker directly on the header line displaying active sources (`Spotify, Firefox, Discord, ...`), and expands on click to reveal full cards.
 - **Horizontal Card Deck**: Active application streams are elevated to the top of the panel in a horizontal card carousel with dedicated mouse wheel, touchpad, and keyboard horizontal scrolling.
