@@ -69,6 +69,8 @@ Panel {
   property bool expandStreams: false
   property var soundCards: []
   property var simultaneousSlaves: []
+  property bool expandMultiOutput: false
+  readonly property bool showMultiOutputChips: root.expandMultiOutput || root.isSimultaneousActive
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
     if (root.simultaneousSlaves && root.simultaneousSlaves.length >= 2) return true
@@ -1269,7 +1271,7 @@ Panel {
                   anchors.rightMargin: Style.space(8)
                   spacing: Style.space(6)
 
-                  Item {
+                    Item {
                     width: parent.width
                     implicitHeight: Math.max(simulTitleRow.implicitHeight, clearSimulBtn.implicitHeight)
 
@@ -1297,13 +1299,20 @@ Panel {
                         font.bold: true
                         anchors.verticalCenter: parent.verticalCenter
                       }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.expandMultiOutput = !root.expandMultiOutput
+                      }
                     }
 
                     Row {
                       id: clearSimulBtn
                       anchors.right: parent.right
                       anchors.verticalCenter: parent.verticalCenter
-                      spacing: Style.space(6)
+                      spacing: Style.space(8)
 
                       Text {
                         visible: root.isSimultaneousActive
@@ -1332,7 +1341,7 @@ Panel {
                       }
 
                       Text {
-                        visible: !root.isSimultaneousActive
+                        visible: !root.isSimultaneousActive && root.showMultiOutputChips
                         text: "Select all"
                         color: allSimulMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
                         font.family: root.bar.fontFamily
@@ -1349,10 +1358,29 @@ Panel {
                           onClicked: root.toggleSimultaneous()
                         }
                       }
+
+                      Text {
+                        text: root.showMultiOutputChips ? "󰅀 Hide" : "󰅂 Show"
+                        color: toggleMultiMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                          id: toggleMultiMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.expandMultiOutput = !root.expandMultiOutput
+                        }
+                      }
                     }
                   }
 
                   Flow {
+                    visible: root.showMultiOutputChips
                     width: parent.width
                     spacing: Style.space(4)
 
