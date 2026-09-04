@@ -87,13 +87,15 @@ function parseRenames(raw) {
   }
 }
 
-function parseSimultaneousSlaves(raw) {
+function parseMultiOutputTargets(raw) {
   if (!raw) return []
   try {
     var data = typeof raw === "string" ? JSON.parse(raw) : raw
     if (Array.isArray(data)) return data
     if (data && typeof data === "object") {
+      if (Array.isArray(data.multiOutputTargets)) return data.multiOutputTargets
       if (Array.isArray(data.simultaneousSlaves)) return data.simultaneousSlaves
+      if (Array.isArray(data.targets)) return data.targets
       if (Array.isArray(data.slaves)) return data.slaves
     }
     return []
@@ -102,11 +104,15 @@ function parseSimultaneousSlaves(raw) {
   }
 }
 
-function isSinkInSimultaneous(sinkNode, slaves) {
-  if (!sinkNode || !slaves || !Array.isArray(slaves) || slaves.length === 0) return false
+function parseSimultaneousSlaves(raw) {
+  return parseMultiOutputTargets(raw)
+}
+
+function isSinkInSimultaneous(sinkNode, targets) {
+  if (!sinkNode || !targets || !Array.isArray(targets) || targets.length === 0) return false
   var name = String(sinkNode.name || "")
-  for (var i = 0; i < slaves.length; i++) {
-    if (slaves[i] === name || slaves[i].indexOf(name) !== -1 || name.indexOf(slaves[i]) !== -1)
+  for (var i = 0; i < targets.length; i++) {
+    if (targets[i] === name || targets[i].indexOf(name) !== -1 || name.indexOf(targets[i]) !== -1)
       return true
   }
   return false
@@ -377,6 +383,7 @@ if (typeof module !== "undefined") {
     parseCardProfiles: parseCardProfiles,
     parseStreamLinks: parseStreamLinks,
     parseRenames: parseRenames,
+    parseMultiOutputTargets: parseMultiOutputTargets,
     parseSimultaneousSlaves: parseSimultaneousSlaves,
     isSinkInSimultaneous: isSinkInSimultaneous,
     friendlyDeviceLabel: friendlyDeviceLabel,

@@ -68,7 +68,9 @@ Panel {
   property bool expandInputLevels: false
   property bool expandStreams: false
   property var soundCards: []
-  property var simultaneousSlaves: []
+  property var multiOutputTargets: []
+  // Backward compatibility alias for multiOutputTargets
+  readonly property var simultaneousSlaves: multiOutputTargets
   property double lastSimultaneousUserAction: 0
   property double lastMasterVolumeUserAction: 0
   property real multiOutputMasterVolume: 1.0
@@ -77,7 +79,7 @@ Panel {
   readonly property bool showMultiOutputChips: root.expandMultiOutput || root.isSimultaneousActive
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
-    if (root.simultaneousSlaves && root.simultaneousSlaves.length >= 2) return true
+    if (root.multiOutputTargets && root.multiOutputTargets.length >= 2) return true
     for (var i = 0; i < root.soundCards.length; i++) {
       if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
     }
@@ -254,6 +256,10 @@ Panel {
     ? Style.selectedFillFor(bar.foreground, Color.accent)
     : "transparent"
 
+  // Note: For the "output" section, keyboard cursor navigation (j/k) moves directly between
+  // the master slider (selectedIndex = -1) and the individual SinkRows (0..displayAudioSinks.length - 1).
+  // The Multi-Output chips are cleanly bypassed when collapsed (root.expandMultiOutput == false)
+  // as well as when expanded, preventing focus traps during linear vertical traversal.
   function sectionCount(section) {
     if (section === "output") return displayAudioSinks.length
     if (section === "input") return displayAudioSources.length
@@ -561,10 +567,10 @@ Panel {
     var sinkName = String(node.name || "")
     var sinkId = String(node.id !== undefined ? node.id : "")
     if (root.isSimultaneousActive) {
-      root.simultaneousSlaves = [sinkName]
+      root.multiOutputTargets = [sinkName]
       Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", sinkName])
     } else {
-      root.simultaneousSlaves = [sinkName]
+      root.multiOutputTargets = [sinkName]
     }
     Pipewire.preferredDefaultAudioSink = node
     if (node.audio) node.audio.muted = false
@@ -706,11 +712,11 @@ Panel {
     
     var current = []
     if (root.isSimultaneousActive) {
-      current = (root.simultaneousSlaves || []).slice()
+      current = (root.multiOutputTargets || []).slice()
     } else {
       var defaultName = (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) ? String(root.sink.name || "") : ""
       if (defaultName) current = [defaultName]
-      else if (root.simultaneousSlaves && root.simultaneousSlaves.length > 0) current = root.simultaneousSlaves.slice()
+      else if (root.multiOutputTargets && root.multiOutputTargets.length > 0) current = root.multiOutputTargets.slice()
     }
 
     var idx = current.indexOf(name)
@@ -723,7 +729,7 @@ Panel {
       current.push(name)
     }
 
-    root.simultaneousSlaves = current
+    root.multiOutputTargets = current
     var args = [root.routingBin, "set-simultaneous-sinks"].concat(current)
     Quickshell.execDetached(args)
     Qt.callLater(function() {
@@ -791,17 +797,20 @@ Panel {
       onStreamFinished: {
         root.soundCards = Model.parseCardProfiles(text)
         if (Date.now() - root.lastSimultaneousUserAction > 1500) {
-          var slaves = []
+          var targets = []
           for (var i = 0; i < root.soundCards.length; i++) {
-            if (root.soundCards[i] && Array.isArray(root.soundCards[i].simultaneousSlaves) && root.soundCards[i].simultaneousSlaves.length > 0) {
-              slaves = root.soundCards[i].simultaneousSlaves
+            if (root.soundCards[i] && Array.isArray(root.soundCards[i].multiOutputTargets) && root.soundCards[i].multiOutputTargets.length > 0) {
+              targets = root.soundCards[i].multiOutputTargets
+              break
+            } else if (root.soundCards[i] && Array.isArray(root.soundCards[i].simultaneousSlaves) && root.soundCards[i].simultaneousSlaves.length > 0) {
+              targets = root.soundCards[i].simultaneousSlaves
               break
             }
           }
-          if (slaves.length > 0) {
-            root.simultaneousSlaves = slaves
+          if (targets.length > 0) {
+            root.multiOutputTargets = targets
           } else if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) {
-            root.simultaneousSlaves = [String(root.sink.name)]
+            root.multiOutputTargets = [String(root.sink.name)]
           }
         }
         if (Date.now() - root.lastMasterVolumeUserAction > 1500) {
@@ -1351,7 +1360,7 @@ Panel {
 
                       Text {
                         text: root.isSimultaneousActive
-                          ? ("Multi-Output Active (" + root.simultaneousSlaves.length + " outputs)")
+                          ? ("Multi-Output Active (" + root.multiOutputTargets.length + " outputs)")
                           : "Multi-Output"
                         color: root.isSimultaneousActive ? Color.accent : root.bar.foreground
                         font.family: root.bar.fontFamily
@@ -1391,7 +1400,7 @@ Panel {
                           cursorShape: Qt.PointingHandCursor
                           onClicked: {
                             var target = (root.sink && !root.isSimultaneousActive) ? String(root.sink.name || "") : (root.displayAudioSinks.length > 0 ? String(root.displayAudioSinks[0].name || "") : "")
-                            root.simultaneousSlaves = target ? [target] : []
+                            root.multiOutputTargets = target ? [target] : []
                             Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", target])
                             Qt.callLater(function() {
                               refreshRoutingState()
@@ -1453,9 +1462,9 @@ Panel {
                         required property var modelData
                         readonly property bool isSelected: {
                           if (root.isSimultaneousActive) {
-                            return Model.isSinkInSimultaneous(simulChip.modelData, root.simultaneousSlaves)
+                            return Model.isSinkInSimultaneous(simulChip.modelData, root.multiOutputTargets)
                           } else {
-                            if (root.simultaneousSlaves && root.simultaneousSlaves.length > 0 && Model.isSinkInSimultaneous(simulChip.modelData, root.simultaneousSlaves)) {
+                            if (root.multiOutputTargets && root.multiOutputTargets.length > 0 && Model.isSinkInSimultaneous(simulChip.modelData, root.multiOutputTargets)) {
                               return true
                             }
                             return !!(root.sink && simulChip.modelData && (root.sink.id === simulChip.modelData.id || root.sink.name === simulChip.modelData.name))
@@ -1714,11 +1723,13 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
-    readonly property bool isSimultaneousSlave: root.isSimultaneousActive && Model.isSinkInSimultaneous(node, root.simultaneousSlaves)
-    readonly property bool isActive: (!root.isSimultaneousActive && root.sink && node && root.sink.id === node.id) || isSimultaneousSlave
+    readonly property bool isMultiOutputTarget: root.isSimultaneousActive && Model.isSinkInSimultaneous(node, root.multiOutputTargets)
+    // Backward compatibility alias for isMultiOutputTarget
+    readonly property bool isSimultaneousSlave: isMultiOutputTarget
+    readonly property bool isActive: (!root.isSimultaneousActive && root.sink && node && root.sink.id === node.id) || isMultiOutputTarget
     readonly property real sinkVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool sinkMuted: node && node.audio ? node.audio.muted : false
-    readonly property bool showSlider: (root.expandOutputLevels && !isActive) || isSimultaneousSlave
+    readonly property bool showSlider: (root.expandOutputLevels && !isActive) || isMultiOutputTarget
 
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
