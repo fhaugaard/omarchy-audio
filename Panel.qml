@@ -10,8 +10,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "omarchy.audio"
-  ipcTarget: "omarchy.audio"
+  moduleName: "skye.audio"
+  ipcTarget: "skye.audio"
 
   readonly property string renameBin: Qt.resolvedUrl("bin/omarchy-audio-rename").toString().replace(/^file:\/\//, "")
   readonly property string routingBin: Qt.resolvedUrl("bin/omarchy-audio-routing").toString().replace(/^file:\/\//, "")
@@ -29,7 +29,7 @@ Panel {
       var n = nodes[i]
       if (n && n.isSink && !n.isStream) {
         var name = String(n.name || "")
-        if (name.indexOf("output.omarchy_combined") === 0) continue
+        if (name.indexOf("omarchy_combined") !== -1) continue
         list.push(n)
       }
     }
@@ -42,7 +42,7 @@ Panel {
       var n = nodes[i]
       if (n && !n.isSink && !n.isStream && isAudioSource(n)) {
         var name = n.name || ""
-        if (name === "quickshell") continue
+        if (name === "quickshell" || name.indexOf("omarchy_combined") !== -1) continue
         list.push(n)
       }
     }
@@ -54,8 +54,9 @@ Panel {
     for (var i = 0; i < nodes.length; i++) {
       var n = nodes[i]
       if (!n || !n.isStream || !isPlaybackStream(n)) continue
-      if (String(n.name || "").indexOf("omarchy_speaker_tuning") === 0) continue
-      if (String(n.name || "").indexOf("output.omarchy_combined") === 0) continue
+      var sname = String(n.name || "")
+      if (sname.indexOf("omarchy_speaker_tuning") !== -1) continue
+      if (sname.indexOf("omarchy_combined") !== -1) continue
       list.push(n)
     }
     return list
@@ -65,9 +66,83 @@ Panel {
   property bool sinkAvailabilityLoaded: false
   property bool expandOutputLevels: false
   property bool expandInputLevels: false
+  property bool expandStreams: false
   property var soundCards: []
+  readonly property bool isSimultaneousActive: {
+    if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
+    for (var i = 0; i < root.soundCards.length; i++) {
+      if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
+    }
+    return false
+  }
   property var streamLinks: ({})
   property var customRenames: ({})
+  property string soloStreamId: ""
+  property var preSoloMuteStates: ({})
+
+  function toggleSolo(streamNode) {
+    if (!streamNode || !streamNode.audio) return
+    var targetId = String(streamNode.id !== undefined ? streamNode.id : "")
+    if (!targetId) return
+
+    if (soloStreamId === targetId) {
+      restoreSoloMuteStates()
+    } else {
+      var snapshot = {}
+      for (var i = 0; i < displayAudioStreams.length; i++) {
+        var s = displayAudioStreams[i]
+        if (s && s.audio) {
+          snapshot[String(s.id)] = s.audio.muted
+        }
+      }
+      preSoloMuteStates = snapshot
+      soloStreamId = targetId
+
+      for (var j = 0; j < displayAudioStreams.length; j++) {
+        var st = displayAudioStreams[j]
+        if (st && st.audio) {
+          if (String(st.id) === targetId) {
+            st.audio.muted = false
+          } else {
+            st.audio.muted = true
+          }
+        }
+      }
+    }
+  }
+
+  function restoreSoloMuteStates() {
+    if (!soloStreamId && Object.keys(preSoloMuteStates).length === 0) return
+    for (var i = 0; i < displayAudioStreams.length; i++) {
+      var s = displayAudioStreams[i]
+      if (s && s.audio) {
+        var sid = String(s.id)
+        if (preSoloMuteStates.hasOwnProperty(sid)) {
+          s.audio.muted = preSoloMuteStates[sid]
+        } else {
+          s.audio.muted = false
+        }
+      }
+    }
+    soloStreamId = ""
+    preSoloMuteStates = ({})
+  }
+
+  function checkSoloIntegrity() {
+    if (!soloStreamId) return
+    var found = false
+    for (var i = 0; i < displayAudioStreams.length; i++) {
+      var s = displayAudioStreams[i]
+      if (s && String(s.id) === soloStreamId) {
+        found = true
+      } else if (s && s.audio && !s.audio.muted && !preSoloMuteStates.hasOwnProperty(String(s.id))) {
+        s.audio.muted = true
+      }
+    }
+    if (!found) {
+      restoreSoloMuteStates()
+    }
+  }
 
   function isPlaybackStream(node) {
     return Model.isPlaybackStream(node)
@@ -77,6 +152,10 @@ Panel {
     return Model.isAudioSource(node)
   }
 
+  function streamGlyph(node) {
+    return Model.streamGlyph(node, mprisPlayers)
+  }
+
   property var cachedAudioSinks: []
   property var cachedAudioSources: []
 
@@ -84,13 +163,17 @@ Panel {
     var list = []
     for (var i = 0; i < candidateSinks.length; i++)
       if (sinkAvailable(candidateSinks[i])) list.push(candidateSinks[i])
-    if (sink && list.indexOf(sink) < 0) list.unshift(sink)
+    if (sink && list.indexOf(sink) < 0 && String(sink.name || "").indexOf("omarchy_combined") === -1) {
+      list.unshift(sink)
+    }
     return list
   }
 
   readonly property var rawAudioSources: {
     var list = candidateSources.slice()
-    if (source && list.indexOf(source) < 0) list.unshift(source)
+    if (source && list.indexOf(source) < 0 && String(source.name || "").indexOf("omarchy_combined") === -1) {
+      list.unshift(source)
+    }
     return list
   }
 
@@ -156,7 +239,7 @@ Panel {
   function sectionCount(section) {
     if (section === "output") return displayAudioSinks.length
     if (section === "input") return displayAudioSources.length
-    if (section === "streams") return displayAudioStreams.length
+    if (section === "streams") return root.expandStreams ? displayAudioStreams.length : 0
     return 0
   }
 
@@ -168,16 +251,16 @@ Panel {
   }
 
   function sectionHasSlider(section) {
-    if (section === "output") return true
+    if (section === "output") return !root.isSimultaneousActive
     if (section === "input") return !!source
     return false
   }
 
   readonly property var visibleSections: {
     var list = []
+    if (sectionVisible("streams")) list.push("streams")
     if (sectionVisible("output")) list.push("output")
     if (sectionVisible("input")) list.push("input")
-    if (sectionVisible("streams")) list.push("streams")
     return list
   }
 
@@ -272,7 +355,7 @@ Panel {
       if (src) setDefaultSource(src)
       return
     }
-    if (focusSection === "streams" && selectedIndex >= 0) {
+    if (focusSection === "streams" && selectedIndex >= 0 && selectedIndex < displayAudioStreams.length) {
       var st = displayAudioStreams[selectedIndex]
       if (st && st.audio) st.audio.muted = !st.audio.muted
     }
@@ -282,8 +365,8 @@ Panel {
     if (opened) {
       refreshRoutingState()
       refreshDisplayAudioModels()
-      focusSection = "output"
-      selectedIndex = -1
+      focusSection = displayAudioStreams.length > 0 ? "streams" : "output"
+      selectedIndex = sectionHasSlider(focusSection) ? -1 : 0
       cursorActive = false
       Qt.callLater(resetScroll)
     } else {
@@ -295,6 +378,7 @@ Panel {
   onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
   onAudioStreamsChanged: {
     scheduleDisplayAudioModelRefresh()
+    checkSoloIntegrity()
     if (opened && !streamLinksProc.running) streamLinksProc.running = true
   }
 
@@ -307,6 +391,7 @@ Panel {
     displayAudioSinks = listSnapshot(audioSinks)
     displayAudioSources = listSnapshot(audioSources)
     displayAudioStreams = listSnapshot(audioStreams)
+    checkSoloIntegrity()
     clampCursor()
   }
 
@@ -336,16 +421,31 @@ Panel {
     var maxY = Math.max(0, (flick.contentHeight || 0) - flick.height)
     if (maxY <= Style.space(24) || (root.focusSection === "output" && root.selectedIndex === -1)) {
       flick.contentY = 0
-      return
+    } else {
+      var pt = item.mapToItem(flick.contentItem || flick, 0, 0)
+      var top = pt.y
+      var bottom = top + (item.height || 0)
+      var viewTop = flick.contentY
+      var viewBottom = viewTop + flick.height
+      if (top < viewTop + margin) flick.contentY = Math.max(0, Math.min(maxY, top - margin))
+      else if (bottom > viewBottom - margin)
+        flick.contentY = Math.max(0, Math.min(maxY, bottom + margin - flick.height))
     }
-    var pt = item.mapToItem(flick.contentItem || flick, 0, 0)
-    var top = pt.y
-    var bottom = top + (item.height || 0)
-    var viewTop = flick.contentY
-    var viewBottom = viewTop + flick.height
-    if (top < viewTop + margin) flick.contentY = Math.max(0, Math.min(maxY, top - margin))
-    else if (bottom > viewBottom - margin)
-      flick.contentY = Math.max(0, Math.min(maxY, bottom + margin - flick.height))
+
+    if (root.focusSection === "streams" && typeof streamsFlickable !== "undefined" && streamsFlickable) {
+      var sFlick = streamsFlickable
+      var maxX = Math.max(0, (sFlick.contentWidth || 0) - streamsScrollView.width)
+      if (maxX > 0) {
+        var sPt = item.mapToItem(sFlick.contentItem || sFlick, 0, 0)
+        var left = sPt.x
+        var right = left + (item.width || 0)
+        var sViewLeft = sFlick.contentX
+        var sViewRight = sViewLeft + streamsScrollView.width
+        if (left < sViewLeft + margin) sFlick.contentX = Math.max(0, Math.min(maxX, left - margin))
+        else if (right > sViewRight - margin)
+          sFlick.contentX = Math.max(0, Math.min(maxX, right + margin - streamsScrollView.width))
+      }
+    }
   }
 
   function clampCursor() {
@@ -420,14 +520,24 @@ Panel {
 
   function setDefaultSink(node) {
     if (!node) return
+    var sinkName = String(node.name || "")
+    var sinkId = String(node.id !== undefined ? node.id : "")
+    if (root.isSimultaneousActive) {
+      Quickshell.execDetached([root.routingBin, "toggle-simultaneous", sinkName])
+    }
     Pipewire.preferredDefaultAudioSink = node
-    if (node.id !== undefined && node.name) {
+    if (node.audio) node.audio.muted = false
+    if (sinkId && sinkName) {
       Quickshell.execDetached([
         "omarchy-audio-output-set-default",
-        String(node.id),
-        String(node.name)
+        sinkId,
+        sinkName
       ])
     }
+    Qt.callLater(function() {
+      refreshRoutingState()
+      scheduleDisplayAudioModelRefresh()
+    })
   }
 
   function setDefaultSource(node) {
@@ -551,8 +661,17 @@ Panel {
     if (!streamNode || !sinkNode) return
     var streamId = String(streamNode.id !== undefined ? streamNode.id : "")
     var streamName = String(streamNode.name || Model.rawStreamLabel(streamNode) || "")
+    var rawName = String(Model.rawStreamLabel(streamNode) || "")
     var sinkName = String(sinkNode.name || "")
     var sinkId = String(sinkNode.id !== undefined ? sinkNode.id : "")
+
+    // Instant optimistic UI update for instant feedback
+    var updated = Object.assign({}, root.streamLinks)
+    if (streamId) updated[streamId] = [sinkName]
+    if (streamName) updated[streamName] = [sinkName]
+    if (rawName) updated[rawName] = [sinkName]
+    root.streamLinks = updated
+
     Quickshell.execDetached([root.routingBin, "route-stream-to-sink", streamId, sinkName, streamName, sinkId])
     Qt.callLater(function() {
       if (!streamLinksProc.running) streamLinksProc.running = true
@@ -697,6 +816,13 @@ Panel {
           } else {
             root.toggleOutputMute()
           }
+        } else if (t === "s" || t === "S") {
+          if (!root.cursorActive) return
+          if (root.focusSection === "streams" && root.selectedIndex >= 0
+              && root.selectedIndex < root.displayAudioStreams.length) {
+            var strNode = root.displayAudioStreams[root.selectedIndex]
+            root.toggleSolo(strNode)
+          }
         }
       }
 
@@ -789,6 +915,231 @@ Panel {
             }
           }
 
+          // ---- Playback Sources / Application Streams (Top-Aligned Horizontal Deck) ----
+          PanelSeparator {
+            visible: root.displayAudioStreams.length > 0
+            foreground: root.bar.foreground
+          }
+
+          Column {
+            id: streamsSection
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.displayAudioStreams.length > 0
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(streamsHeader.implicitHeight, streamHeaderControls.implicitHeight)
+
+              PanelSectionHeader {
+                id: streamsHeader
+                text: "PLAYBACK SOURCES"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              // Collapsed scrolling chiron ticker on the exact same header line
+              Item {
+                id: streamsChiron
+                visible: !root.expandStreams && root.displayAudioStreams.length > 0
+                anchors.left: streamsHeader.right
+                anchors.leftMargin: Style.space(8)
+                anchors.right: streamHeaderControls.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                height: streamsHeader.implicitHeight
+                clip: true
+
+                readonly property string sourcesListText: {
+                  var names = []
+                  for (var i = 0; i < root.displayAudioStreams.length; i++) {
+                    var s = root.displayAudioStreams[i]
+                    var label = root.streamLabel(s)
+                    if (label && names.indexOf(label) === -1) {
+                      names.push(label)
+                    }
+                  }
+                  return names.join(", ")
+                }
+
+                readonly property bool needsScroll: chironText1.implicitWidth > width
+
+                Row {
+                  id: chironTrack
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(24)
+                  x: 0
+
+                  Text {
+                    id: chironText1
+                    text: streamsChiron.sourcesListText
+                    color: Qt.darker(root.bar.foreground, 1.45)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: false
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    id: chironText2
+                    visible: streamsChiron.needsScroll
+                    text: streamsChiron.sourcesListText
+                    color: Qt.darker(root.bar.foreground, 1.45)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: false
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  NumberAnimation on x {
+                    running: streamsChiron.visible && streamsChiron.needsScroll
+                    loops: Animation.Infinite
+                    from: 0
+                    to: -(chironText1.implicitWidth + Style.space(24))
+                    duration: Math.max(3000, (chironText1.implicitWidth + Style.space(24)) * 36)
+                    easing.type: Easing.Linear
+                  }
+                }
+
+                MouseArea {
+                  id: chironMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.expandStreams = true
+                }
+              }
+
+              Row {
+                id: streamHeaderControls
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(8)
+
+                // Solo badge (if active)
+                Row {
+                  id: soloIndicator
+                  spacing: Style.space(6)
+                  visible: !!root.soloStreamId
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  Rectangle {
+                    width: Style.space(8)
+                    height: Style.space(8)
+                    radius: Style.space(4)
+                    color: Color.accent
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: "SOLO ACTIVE"
+                    color: Color.accent
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: "(Clear)"
+                    color: clearSoloMouse.containsMouse ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    MouseArea {
+                      id: clearSoloMouse
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(4)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.restoreSoloMuteStates()
+                    }
+                  }
+                }
+
+                // Expand / Collapse toggle
+                Text {
+                  text: root.expandStreams ? "󰅀 Hide" : "󰅂 Show"
+                  color: toggleStreamsMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  MouseArea {
+                    id: toggleStreamsMouse
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.expandStreams = !root.expandStreams
+                  }
+                }
+              }
+            }
+
+            ScrollView {
+              id: streamsScrollView
+              visible: root.expandStreams
+              width: parent.width
+              implicitHeight: streamsDeckRow.implicitHeight + (ScrollBar.horizontal.visible ? Style.space(14) : Style.space(4))
+              clip: true
+              ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+              ScrollBar.horizontal.policy: streamsDeckRow.implicitWidth > width ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+
+              Flickable {
+                id: streamsFlickable
+                width: streamsScrollView.width
+                height: streamsDeckRow.implicitHeight + Style.space(4)
+                contentWidth: streamsDeckRow.implicitWidth + Style.space(8)
+                contentHeight: streamsDeckRow.implicitHeight
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.HorizontalFlick
+                interactive: streamsDeckRow.implicitWidth > width
+
+                WheelHandler {
+                  id: streamsWheelHandler
+                  acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                  onWheel: function(event) {
+                    if (streamsFlickable.contentWidth <= streamsScrollView.width) {
+                      event.accepted = false
+                      return
+                    }
+                    var delta = event.angleDelta.x !== 0 ? event.angleDelta.x : event.angleDelta.y
+                    var maxX = Math.max(0, streamsFlickable.contentWidth - streamsScrollView.width)
+                    var nextX = Math.max(0, Math.min(maxX, streamsFlickable.contentX - delta))
+                    if (nextX !== streamsFlickable.contentX) {
+                      streamsFlickable.contentX = nextX
+                      event.accepted = true
+                    } else {
+                      event.accepted = false
+                    }
+                  }
+                }
+
+                Row {
+                  id: streamsDeckRow
+                  spacing: Style.space(10)
+                  padding: Style.space(2)
+
+                  Repeater {
+                    model: root.displayAudioStreams
+
+                    StreamCard {
+                      required property var modelData
+                      required property int index
+                      node: modelData
+                      rowIndex: index
+                    }
+                  }
+                }
+              }
+            }
+          }
+
           // ---- Output devices ----
           PanelSeparator {
             foreground: root.bar.foreground
@@ -818,7 +1169,7 @@ Panel {
 
                 // Toggle individual device volume sliders
                 Text {
-                  visible: root.displayAudioSinks.length > 1
+                  visible: !root.isSimultaneousActive && root.displayAudioSinks.length > 1
                   text: root.expandOutputLevels ? "󰝞 Hide levels" : "󰝝 Show levels"
                   color: outputLevelsMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
                   font.family: root.bar.fontFamily
@@ -838,6 +1189,7 @@ Panel {
 
                 Text {
                   id: outputPercent
+                  visible: !root.isSimultaneousActive
                   textFormat: Text.PlainText
                   text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
                   color: Qt.darker(root.bar.foreground, 1.4)
@@ -855,13 +1207,8 @@ Panel {
               visible: root.displayAudioSinks.length > 1
               width: parent.width
               height: Style.space(24)
-              radius: Style.radius.sm || Style.space(3)
-              property bool isSimultaneous: {
-                for (var i = 0; i < root.soundCards.length; i++) {
-                  if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
-                }
-                return false
-              }
+              radius: Math.min(4, Style.cornerRadius)
+              readonly property bool isSimultaneous: root.isSimultaneousActive
               color: isSimultaneous ? Util.alpha(Color.accent, 0.25) : (simulMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.05))
               border.color: isSimultaneous ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
               border.width: 1
@@ -899,6 +1246,7 @@ Panel {
 
             CursorSurface {
               id: outputSliderRow
+              visible: !root.isSimultaneousActive
               width: parent.width
               height: outputSlider.implicitHeight + Style.spacing.controlGap
               hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === -1
@@ -910,8 +1258,8 @@ Panel {
                 id: outputSlider
                 bar: root.bar
                 anchors.fill: parent
-                anchors.leftMargin: Style.space(6)
-                anchors.rightMargin: Style.space(6)
+                anchors.leftMargin: Style.space(12)
+                anchors.rightMargin: Style.space(12)
                 minimum: 0
                 maximum: 1
                 step: 0.05
@@ -1021,8 +1369,8 @@ Panel {
               Column {
                 id: inputControls
                 anchors.fill: parent
-                anchors.leftMargin: Style.space(6)
-                anchors.rightMargin: Style.space(6)
+                anchors.leftMargin: Style.space(12)
+                anchors.rightMargin: Style.space(12)
                 spacing: Style.space(5)
 
                 PanelSlider {
@@ -1076,36 +1424,6 @@ Panel {
               }
             }
           }
-
-          // ---- Per-app streams ----
-          PanelSeparator {
-            visible: root.displayAudioStreams.length > 0
-            foreground: root.bar.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(10)
-            visible: root.displayAudioStreams.length > 0
-
-            PanelSectionHeader {
-              text: "SOURCES"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Repeater {
-              model: root.displayAudioStreams
-
-              StreamRow {
-                required property var modelData
-                required property int index
-                width: panelColumn.width
-                node: modelData
-                rowIndex: index
-              }
-            }
-          }
         }
       }
     }
@@ -1120,9 +1438,10 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
-    readonly property bool isActive: root.sink && node && root.sink.id === node.id
+    readonly property bool isActive: !root.isSimultaneousActive && root.sink && node && root.sink.id === node.id
     readonly property real sinkVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool sinkMuted: node && node.audio ? node.audio.muted : false
+    readonly property bool showSlider: root.expandOutputLevels || root.isSimultaneousActive
 
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
@@ -1197,9 +1516,9 @@ Panel {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(4)
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(6)
       z: 1
 
       Row {
@@ -1225,12 +1544,12 @@ Panel {
           font.pixelSize: Style.font.body
           font.bold: sinkRow.isActive
           elide: Text.ElideRight
-          width: parent.width - Style.space(22) - Style.space(8) - (root.expandOutputLevels ? Style.space(40) : 0) - Style.space(24)
+          width: parent.width - Style.space(22) - Style.space(8) - (sinkRow.showSlider ? Style.space(40) : 0) - Style.space(24)
           anchors.verticalCenter: parent.verticalCenter
         }
 
         Text {
-          visible: root.expandOutputLevels && !sinkRow.isActive
+          visible: sinkRow.showSlider
           textFormat: Text.PlainText
           text: Math.round(sinkRow.sinkVolume * 100) + "%"
           color: Qt.darker(root.bar.foreground, 1.4)
@@ -1275,22 +1594,32 @@ Panel {
       }
 
       // Discrete per-device volume slider
-      PanelSlider {
-        visible: root.expandOutputLevels && !sinkRow.isActive
-        bar: root.bar
+      Item {
+        visible: sinkRow.showSlider
         width: parent.width
-        minimum: 0
-        maximum: 1
-        step: 0.05
-        value: sinkRow.sinkVolume
-        opacity: sinkRow.sinkMuted ? 0.5 : 1.0
+        implicitHeight: sinkSlider.implicitHeight + Style.space(2)
 
-        onMoved: function(v) {
-          if (sinkRow.node && sinkRow.node.audio) sinkRow.node.audio.volume = v
-        }
-        onRightClicked: {
-          if (sinkRow.node && sinkRow.node.audio)
-            sinkRow.node.audio.muted = !sinkRow.node.audio.muted
+        PanelSlider {
+          id: sinkSlider
+          bar: root.bar
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.leftMargin: Style.space(12)
+          anchors.rightMargin: Style.space(12)
+          anchors.verticalCenter: parent.verticalCenter
+          minimum: 0
+          maximum: 1
+          step: 0.05
+          value: sinkRow.sinkVolume
+          opacity: sinkRow.sinkMuted ? 0.5 : 1.0
+
+          onMoved: function(v) {
+            if (sinkRow.node && sinkRow.node.audio) sinkRow.node.audio.volume = v
+          }
+          onRightClicked: {
+            if (sinkRow.node && sinkRow.node.audio)
+              sinkRow.node.audio.muted = !sinkRow.node.audio.muted
+          }
         }
       }
     }
@@ -1464,9 +1793,9 @@ Panel {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(4)
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(6)
       z: 1
 
       Row {
@@ -1497,7 +1826,7 @@ Panel {
         }
 
         Text {
-          visible: root.expandInputLevels && !sourceRow.isActive
+          visible: root.expandInputLevels
           textFormat: Text.PlainText
           text: Math.round(sourceRow.sourceVolume * 100) + "%"
           color: Qt.darker(root.bar.foreground, 1.4)
@@ -1542,22 +1871,32 @@ Panel {
       }
 
       // Discrete per-device input gain slider
-      PanelSlider {
-        visible: root.expandInputLevels && !sourceRow.isActive
-        bar: root.bar
+      Item {
+        visible: root.expandInputLevels
         width: parent.width
-        minimum: 0
-        maximum: 1
-        step: 0.05
-        value: sourceRow.sourceVolume
-        opacity: sourceRow.sourceMuted ? 0.5 : 1.0
+        implicitHeight: sourceSlider.implicitHeight + Style.space(2)
 
-        onMoved: function(v) {
-          if (sourceRow.node && sourceRow.node.audio) sourceRow.node.audio.volume = v
-        }
-        onRightClicked: {
-          if (sourceRow.node && sourceRow.node.audio)
-            sourceRow.node.audio.muted = !sourceRow.node.audio.muted
+        PanelSlider {
+          id: sourceSlider
+          bar: root.bar
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.leftMargin: Style.space(12)
+          anchors.rightMargin: Style.space(12)
+          anchors.verticalCenter: parent.verticalCenter
+          minimum: 0
+          maximum: 1
+          step: 0.05
+          value: sourceRow.sourceVolume
+          opacity: sourceRow.sourceMuted ? 0.5 : 1.0
+
+          onMoved: function(v) {
+            if (sourceRow.node && sourceRow.node.audio) sourceRow.node.audio.volume = v
+          }
+          onRightClicked: {
+            if (sourceRow.node && sourceRow.node.audio)
+              sourceRow.node.audio.muted = !sourceRow.node.audio.muted
+          }
         }
       }
     }
@@ -1647,89 +1986,238 @@ Panel {
     }
   }
 
-  component StreamRow: CursorSurface {
-    id: streamRow
+  component StreamCard: CursorSurface {
+    id: streamCard
     required property var node
     required property int rowIndex
     property bool isRoutingExpanded: false
 
+    readonly property bool isSoloed: root.soloStreamId === String(node ? (node.id !== undefined ? node.id : "") : "")
     readonly property real streamVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool streamMuted: node && node.audio ? node.audio.muted : false
     readonly property bool isActive: root.streamRepresentsPlayer(node, root.activeMediaPlayer)
 
+    readonly property string targetSinkName: {
+      if (!node || !root.streamLinks) return ""
+      var streamId = String(node.id !== undefined ? node.id : "")
+      var streamName = String(node.name || "")
+      var rawName = String(Model.rawStreamLabel(node) || "")
+      var keys = [streamId, streamName, rawName]
+      for (var k = 0; k < keys.length; k++) {
+        if (keys[k] && root.streamLinks[keys[k]] && root.streamLinks[keys[k]].length > 0) {
+          return root.streamLinks[keys[k]][0]
+        }
+      }
+      return ""
+    }
+
+    readonly property string targetSinkLabel: {
+      if (!targetSinkName) return ""
+      for (var i = 0; i < root.displayAudioSinks.length; i++) {
+        var sk = root.displayAudioSinks[i]
+        if (sk && (String(sk.name) === targetSinkName || targetSinkName.indexOf(String(sk.name)) !== -1)) {
+          return root.nodeLabel(sk)
+        }
+      }
+      return ""
+    }
+
+    width: Style.space(210)
+    implicitHeight: cardColumn.implicitHeight + Style.space(16)
+    radius: Style.cornerRadius > 0 ? Math.min(Style.cornerRadius, Style.space(6)) : Style.space(4)
+
     hasCursor: root.cursorActive && root.focusSection === "streams" && root.selectedIndex === rowIndex
-    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(streamRow)
-    current: isActive
+    onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(streamCard)
+    current: isActive || isSoloed
     foreground: root.bar.foreground
-    fill: root.hoverFill
-    currentFill: root.selectedFill
-    implicitHeight: streamColumn.implicitHeight + Style.spacing.xl
+    fill: isSoloed ? Util.alpha(Color.accent, 0.22) : (streamMuted ? Util.alpha(root.bar.foreground, 0.04) : Util.alpha(root.bar.foreground, 0.08))
+    currentFill: isSoloed ? Util.alpha(Color.accent, 0.35) : root.selectedFill
+    outline: isSoloed || hasCursor
 
     Column {
-      id: streamColumn
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(4)
-      z: 1
+      id: cardColumn
+      width: parent.width - Style.space(16)
+      anchors.centerIn: parent
+      spacing: Style.space(8)
 
+      // Header: App icon + App title + Volume %
       Row {
         width: parent.width
-        spacing: Style.space(8)
+        spacing: Style.space(6)
 
         Text {
-          id: streamMuteIcon
           textFormat: Text.PlainText
-          text: streamRow.streamMuted ? "󰝟" : "󰕾"
+          text: root.streamGlyph(streamCard.node)
+          color: streamCard.isSoloed ? Color.accent : root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.body
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: root.streamLabel(streamCard.node)
           color: root.bar.foreground
           font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.title
-          width: Style.space(22)
-          horizontalAlignment: Text.AlignHCenter
+          font.pixelSize: Style.font.body
+          font.bold: true
+          elide: Text.ElideRight
+          width: parent.width - Style.space(68)
           anchors.verticalCenter: parent.verticalCenter
-          opacity: streamRow.streamMuted ? 0.5 : 1.0
+        }
+
+        Text {
+          id: cardPct
+          textFormat: Text.PlainText
+          text: Math.round((streamSlider.dragging ? streamSlider.liveValue : streamCard.streamVolume) * 100) + "%"
+          color: streamCard.streamMuted ? Qt.darker(root.bar.foreground, 1.6) : Qt.darker(root.bar.foreground, 1.2)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          anchors.verticalCenter: parent.verticalCenter
+        }
+      }
+
+      // Output destination badge (if routed/available)
+      Rectangle {
+        visible: !!streamCard.targetSinkLabel
+        width: parent.width
+        height: Style.space(18)
+        radius: Math.min(3, Style.cornerRadius)
+        color: Util.alpha(root.bar.foreground, 0.06)
+
+        Row {
+          anchors.centerIn: parent
+          spacing: Style.space(4)
+
+          Text {
+            text: "󰓃"
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption - 1
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            text: streamCard.targetSinkLabel
+            color: Qt.darker(root.bar.foreground, 1.3)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption - 1
+            elide: Text.ElideRight
+            maximumLineCount: 1
+            width: parent.parent.width - Style.space(24)
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+      }
+
+      // Compact Volume Slider
+      PanelSlider {
+        id: streamSlider
+        bar: root.bar
+        width: parent.width
+        minimum: 0
+        maximum: 1.5
+        step: 0.05
+        value: streamCard.streamVolume
+        opacity: streamCard.streamMuted ? 0.45 : 1.0
+        enabled: !!(streamCard.node && streamCard.node.audio)
+
+        onMoved: function(v) {
+          if (streamCard.node && streamCard.node.audio)
+            streamCard.node.audio.volume = v
+        }
+        onRightClicked: {
+          if (streamCard.node && streamCard.node.audio)
+            streamCard.node.audio.muted = !streamCard.node.audio.muted
+        }
+      }
+
+      // Action Buttons: MUTE · SOLO · ROUTE
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+
+        // Mute Button
+        Rectangle {
+          id: muteBtn
+          width: (parent.width - Style.space(12)) / 3
+          height: Style.space(24)
+          radius: Math.min(3, Style.cornerRadius)
+          color: streamCard.streamMuted ? Util.alpha(Color.accent, 0.25) : (muteMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.15) : Util.alpha(root.bar.foreground, 0.08))
+          border.color: streamCard.streamMuted ? Color.accent : "transparent"
+          border.width: 1
+
+          Text {
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: streamCard.streamMuted ? "󰝟 Muted" : "󰕾 Mute"
+            color: streamCard.streamMuted ? Color.accent : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
 
           MouseArea {
+            id: muteMouse
             anchors.fill: parent
+            hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: {
-              if (streamRow.node && streamRow.node.audio)
-                streamRow.node.audio.muted = !streamRow.node.audio.muted
+            onClicked: function(mouse) {
+              mouse.accepted = true
+              if (streamCard.node && streamCard.node.audio)
+                streamCard.node.audio.muted = !streamCard.node.audio.muted
             }
           }
         }
 
-        Text {
-          textFormat: Text.PlainText
-          text: root.streamLabel(streamRow.node)
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: streamRow.isActive
-          elide: Text.ElideRight
-          width: parent.width - streamMuteIcon.width - streamPct.width - routeBtn.width - Style.space(24)
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
+        // Solo Button
         Rectangle {
-          id: routeBtn
-          width: routeBtnText.implicitWidth + Style.space(10)
-          height: Style.space(20)
-          radius: Style.radius.sm || Style.space(3)
-          color: streamRow.isRoutingExpanded ? Util.alpha(Color.accent, 0.35) : (routeMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.15) : Util.alpha(root.bar.foreground, 0.08))
-          border.color: streamRow.isRoutingExpanded ? Color.accent : "transparent"
+          id: soloBtn
+          width: (parent.width - Style.space(12)) / 3
+          height: Style.space(24)
+          radius: Math.min(3, Style.cornerRadius)
+          color: streamCard.isSoloed ? Color.accent : (soloMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.15) : Util.alpha(root.bar.foreground, 0.08))
+          border.color: streamCard.isSoloed ? Color.accent : "transparent"
           border.width: 1
-          anchors.verticalCenter: parent.verticalCenter
-          z: 3
 
           Text {
-            id: routeBtnText
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            text: streamCard.isSoloed ? "󰓃 Soloed" : "󰓃 Solo"
+            color: streamCard.isSoloed ? "#ffffff" : root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          MouseArea {
+            id: soloMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: function(mouse) {
+              mouse.accepted = true
+              root.toggleSolo(streamCard.node)
+            }
+          }
+        }
+
+        // Route Button
+        Rectangle {
+          id: routeBtn
+          width: (parent.width - Style.space(12)) / 3
+          height: Style.space(24)
+          radius: Math.min(3, Style.cornerRadius)
+          color: streamCard.isRoutingExpanded ? Util.alpha(Color.accent, 0.35) : (routeMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.15) : Util.alpha(root.bar.foreground, 0.08))
+          border.color: streamCard.isRoutingExpanded ? Color.accent : "transparent"
+          border.width: 1
+
+          Text {
             anchors.centerIn: parent
             textFormat: Text.PlainText
             text: "󰌹 Route"
-            color: streamRow.isRoutingExpanded ? Color.accent : root.bar.foreground
+            color: streamCard.isRoutingExpanded ? Color.accent : root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: true
@@ -1742,56 +2230,23 @@ Panel {
             cursorShape: Qt.PointingHandCursor
             onClicked: function(mouse) {
               mouse.accepted = true
-              streamRow.isRoutingExpanded = !streamRow.isRoutingExpanded
+              streamCard.isRoutingExpanded = !streamCard.isRoutingExpanded
             }
           }
         }
-
-        Text {
-          id: streamPct
-          textFormat: Text.PlainText
-          text: Math.round(streamRow.streamVolume * 100) + "%"
-          color: Qt.darker(root.bar.foreground, 1.5)
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
-          width: Style.space(36)
-          horizontalAlignment: Text.AlignRight
-          anchors.verticalCenter: parent.verticalCenter
-          opacity: streamRow.streamMuted ? 0.5 : 1.0
-        }
       }
 
-      PanelSlider {
-        bar: root.bar
-        width: parent.width
-        minimum: 0
-        maximum: 1.5
-        step: 0.05
-        value: streamRow.streamVolume
-        opacity: streamRow.streamMuted ? 0.5 : 1.0
-
-        onMoved: function(v) {
-          if (streamRow.node && streamRow.node.audio) streamRow.node.audio.volume = v
-        }
-        onRightClicked: {
-          if (streamRow.node && streamRow.node.audio)
-            streamRow.node.audio.muted = !streamRow.node.audio.muted
-        }
-      }
-
-      // Dynamic stream routing destinations across listed outputs
+      // Routing selector expansion
       Column {
         width: parent.width
-        visible: streamRow.isRoutingExpanded
+        visible: streamCard.isRoutingExpanded
         spacing: Style.space(4)
-        z: 4
 
         Text {
-          text: "Output Destination:"
+          text: "Route to:"
           color: Qt.darker(root.bar.foreground, 1.4)
           font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Style.font.caption - 1
           font.bold: true
         }
 
@@ -1805,14 +2260,13 @@ Panel {
             Rectangle {
               id: sinkChip
               required property var modelData
-              readonly property bool isLinked: Model.streamIsLinkedToSink(streamRow.node, sinkChip.modelData, root.streamLinks)
-              width: targetContent.implicitWidth + Style.space(12)
-              height: Style.space(22)
-              radius: Style.radius.sm || Style.space(3)
+              readonly property bool isLinked: Model.streamIsLinkedToSink(streamCard.node, sinkChip.modelData, root.streamLinks)
+              width: targetContent.implicitWidth + Style.space(10)
+              height: Style.space(20)
+              radius: Math.min(3, Style.cornerRadius)
               color: sinkChip.isLinked ? Util.alpha(Color.accent, 0.3) : (targetMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.14) : Util.alpha(root.bar.foreground, 0.06))
               border.color: sinkChip.isLinked ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
               border.width: 1
-              z: 5
 
               Row {
                 id: targetContent
@@ -1823,7 +2277,7 @@ Panel {
                   text: root.sinkGlyph(sinkChip.modelData)
                   color: sinkChip.isLinked ? Color.accent : root.bar.foreground
                   font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
+                  font.pixelSize: Style.font.caption - 1
                   anchors.verticalCenter: parent.verticalCenter
                 }
 
@@ -1831,7 +2285,7 @@ Panel {
                   text: root.nodeLabel(sinkChip.modelData)
                   color: sinkChip.isLinked ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.2)
                   font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
+                  font.pixelSize: Style.font.caption - 1
                   font.bold: sinkChip.isLinked
                   elide: Text.ElideRight
                   maximumLineCount: 1
@@ -1842,7 +2296,7 @@ Panel {
                   text: sinkChip.isLinked ? "󰄬" : ""
                   color: Color.accent
                   font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
+                  font.pixelSize: Style.font.caption - 1
                   anchors.verticalCenter: parent.verticalCenter
                   visible: sinkChip.isLinked
                 }
@@ -1853,10 +2307,9 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                z: 6
                 onClicked: function(mouse) {
                   mouse.accepted = true
-                  root.toggleStreamRoute(streamRow.node, sinkChip.modelData)
+                  root.toggleStreamRoute(streamCard.node, sinkChip.modelData)
                 }
               }
             }
@@ -1865,16 +2318,11 @@ Panel {
       }
     }
 
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-      propagateComposedEvents: true
-      z: 0
-      onContainsMouseChanged: if (containsMouse) {
+    HoverHandler {
+      onHoveredChanged: if (hovered) {
         root.cursorActive = true
         root.focusSection = "streams"
-        root.selectedIndex = streamRow.rowIndex
+        root.selectedIndex = streamCard.rowIndex
       }
     }
   }
