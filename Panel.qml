@@ -68,8 +68,10 @@ Panel {
   property bool expandInputLevels: false
   property bool expandStreams: false
   property var soundCards: []
+  property var simultaneousSlaves: []
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
+    if (root.simultaneousSlaves && root.simultaneousSlaves.length >= 2) return true
     for (var i = 0; i < root.soundCards.length; i++) {
       if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
     }
@@ -523,7 +525,8 @@ Panel {
     var sinkName = String(node.name || "")
     var sinkId = String(node.id !== undefined ? node.id : "")
     if (root.isSimultaneousActive) {
-      Quickshell.execDetached([root.routingBin, "toggle-simultaneous", sinkName])
+      root.simultaneousSlaves = []
+      Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", sinkName])
     }
     Pipewire.preferredDefaultAudioSink = node
     if (node.audio) node.audio.muted = false
@@ -657,6 +660,33 @@ Panel {
     })
   }
 
+  function toggleSimultaneousSink(sinkNode) {
+    if (!sinkNode) return
+    var name = String(sinkNode.name || "")
+    var current = (root.simultaneousSlaves || []).slice()
+    var idx = current.indexOf(name)
+    if (idx >= 0) {
+      current.splice(idx, 1)
+    } else {
+      current.push(name)
+    }
+
+    if (current.length === 1 && !root.isSimultaneousActive && root.sink) {
+      var defaultName = String(root.sink.name || "")
+      if (defaultName && defaultName !== name && current.indexOf(defaultName) < 0 && defaultName.indexOf("omarchy_combined") < 0) {
+        current.unshift(defaultName)
+      }
+    }
+
+    root.simultaneousSlaves = current
+    var args = [root.routingBin, "set-simultaneous-sinks"].concat(current)
+    Quickshell.execDetached(args)
+    Qt.callLater(function() {
+      refreshRoutingState()
+      scheduleDisplayAudioModelRefresh()
+    })
+  }
+
   function toggleStreamRoute(streamNode, sinkNode) {
     if (!streamNode || !sinkNode) return
     var streamId = String(streamNode.id !== undefined ? streamNode.id : "")
@@ -714,7 +744,17 @@ Panel {
     command: [root.routingBin, "list-cards"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.soundCards = Model.parseCardProfiles(text)
+      onStreamFinished: {
+        root.soundCards = Model.parseCardProfiles(text)
+        var slaves = []
+        for (var i = 0; i < root.soundCards.length; i++) {
+          if (root.soundCards[i] && Array.isArray(root.soundCards[i].simultaneousSlaves) && root.soundCards[i].simultaneousSlaves.length > 0) {
+            slaves = root.soundCards[i].simultaneousSlaves
+            break
+          }
+        }
+        root.simultaneousSlaves = slaves
+      }
     }
   }
 
@@ -1202,45 +1242,184 @@ Panel {
               }
             }
 
-            // Simultaneous Playback across all devices
-            Rectangle {
+            // Custom Simultaneous Multi-Output Selector
+            Column {
               visible: root.displayAudioSinks.length > 1
               width: parent.width
-              height: Style.space(24)
-              radius: Math.min(4, Style.cornerRadius)
-              readonly property bool isSimultaneous: root.isSimultaneousActive
-              color: isSimultaneous ? Util.alpha(Color.accent, 0.25) : (simulMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.05))
-              border.color: isSimultaneous ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
-              border.width: 1
+              spacing: Style.space(4)
 
-              Row {
-                anchors.centerIn: parent
-                spacing: Style.space(6)
+              Rectangle {
+                width: parent.width
+                implicitHeight: simulCol.implicitHeight + Style.space(12)
+                radius: Math.min(6, Style.cornerRadius)
+                color: root.isSimultaneousActive
+                  ? Util.alpha(Color.accent, 0.12)
+                  : Util.alpha(root.bar.foreground, 0.04)
+                border.color: root.isSimultaneousActive
+                  ? Color.accent
+                  : Util.alpha(root.bar.foreground, 0.15)
+                border.width: 1
 
-                Text {
-                  text: parent.parent.isSimultaneous ? "󰄬" : "󰓃"
-                  color: parent.parent.isSimultaneous ? Color.accent : root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
+                Column {
+                  id: simulCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                }
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(6)
 
-                Text {
-                  text: parent.parent.isSimultaneous ? "Simultaneous Playback Active (All Devices)" : "Play on All Outputs Simultaneously"
-                  color: parent.parent.isSimultaneous ? Color.accent : root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-              }
+                  Item {
+                    width: parent.width
+                    implicitHeight: Math.max(simulTitleRow.implicitHeight, clearSimulBtn.implicitHeight)
 
-              MouseArea {
-                id: simulMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.toggleSimultaneous()
+                    Row {
+                      id: simulTitleRow
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(6)
+
+                      Text {
+                        text: root.isSimultaneousActive ? "󰄬" : "󰓃"
+                        color: root.isSimultaneousActive ? Color.accent : root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+
+                      Text {
+                        text: root.isSimultaneousActive
+                          ? ("Simultaneous Active (" + root.simultaneousSlaves.length + " outputs)")
+                          : "Simultaneous Playback"
+                        color: root.isSimultaneousActive ? Color.accent : root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+                    }
+
+                    Row {
+                      id: clearSimulBtn
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(6)
+
+                      Text {
+                        visible: root.isSimultaneousActive
+                        text: "Single output"
+                        color: clearSimulMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                          id: clearSimulMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            var target = (root.sink && !root.isSimultaneousActive) ? String(root.sink.name || "") : (root.displayAudioSinks.length > 0 ? String(root.displayAudioSinks[0].name || "") : "")
+                            Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", target])
+                            Qt.callLater(function() {
+                              refreshRoutingState()
+                              scheduleDisplayAudioModelRefresh()
+                            })
+                          }
+                        }
+                      }
+
+                      Text {
+                        visible: !root.isSimultaneousActive
+                        text: "Select all"
+                        color: allSimulMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                          id: allSimulMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.toggleSimultaneous()
+                        }
+                      }
+                    }
+                  }
+
+                  Flow {
+                    width: parent.width
+                    spacing: Style.space(4)
+
+                    Repeater {
+                      model: root.displayAudioSinks
+
+                      Rectangle {
+                        id: simulChip
+                        required property var modelData
+                        readonly property bool isSelected: Model.isSinkInSimultaneous(simulChip.modelData, root.simultaneousSlaves)
+                        width: simulChipContent.implicitWidth + Style.space(12)
+                        height: Style.space(22)
+                        radius: Math.min(4, Style.cornerRadius)
+                        color: isSelected
+                          ? Util.alpha(Color.accent, 0.3)
+                          : (chipMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.14) : Util.alpha(root.bar.foreground, 0.06))
+                        border.color: isSelected ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
+                        border.width: 1
+
+                        Row {
+                          id: simulChipContent
+                          anchors.centerIn: parent
+                          spacing: Style.space(4)
+
+                          Text {
+                            text: root.sinkGlyph(simulChip.modelData)
+                            color: simulChip.isSelected ? Color.accent : root.bar.foreground
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+
+                          Text {
+                            text: root.nodeLabel(simulChip.modelData)
+                            color: simulChip.isSelected ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.2)
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            font.bold: simulChip.isSelected
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+
+                          Text {
+                            text: simulChip.isSelected ? "󰄬" : "+"
+                            color: simulChip.isSelected ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+                        }
+
+                        MouseArea {
+                          id: chipMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: function(mouse) {
+                            mouse.accepted = true
+                            root.toggleSimultaneousSink(simulChip.modelData)
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
 
@@ -1438,10 +1617,11 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
-    readonly property bool isActive: !root.isSimultaneousActive && root.sink && node && root.sink.id === node.id
+    readonly property bool isSimultaneousSlave: root.isSimultaneousActive && Model.isSinkInSimultaneous(node, root.simultaneousSlaves)
+    readonly property bool isActive: (!root.isSimultaneousActive && root.sink && node && root.sink.id === node.id) || isSimultaneousSlave
     readonly property real sinkVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool sinkMuted: node && node.audio ? node.audio.muted : false
-    readonly property bool showSlider: root.expandOutputLevels || root.isSimultaneousActive
+    readonly property bool showSlider: (root.expandOutputLevels && !isActive) || isSimultaneousSlave
 
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)

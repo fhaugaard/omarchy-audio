@@ -87,6 +87,31 @@ function parseRenames(raw) {
   }
 }
 
+function parseSimultaneousSlaves(raw) {
+  if (!raw) return []
+  try {
+    var data = typeof raw === "string" ? JSON.parse(raw) : raw
+    if (Array.isArray(data)) return data
+    if (data && typeof data === "object") {
+      if (Array.isArray(data.simultaneousSlaves)) return data.simultaneousSlaves
+      if (Array.isArray(data.slaves)) return data.slaves
+    }
+    return []
+  } catch (e) {
+    return []
+  }
+}
+
+function isSinkInSimultaneous(sinkNode, slaves) {
+  if (!sinkNode || !slaves || !Array.isArray(slaves) || slaves.length === 0) return false
+  var name = String(sinkNode.name || "")
+  for (var i = 0; i < slaves.length; i++) {
+    if (slaves[i] === name || slaves[i].indexOf(name) !== -1 || name.indexOf(slaves[i]) !== -1)
+      return true
+  }
+  return false
+}
+
 function friendlyDeviceLabel(text) {
   var label = String(text || "").trim()
   label = label.replace(/^sof-soundwire\s+/i, "")
@@ -293,6 +318,21 @@ function streamLabel(node, players, streams) {
     || label) || "Stream"
 }
 
+function streamGlyph(node, players, streams) {
+  if (!node) return "󰕾"
+  var label = streamLabel(node, players, streams).toLowerCase()
+  var raw = rawStreamLabel(node).toLowerCase()
+  var combined = label + " " + raw
+  
+  if (combined.indexOf("spotify") !== -1) return ""
+  if (combined.indexOf("firefox") !== -1) return "󰈹"
+  if (combined.indexOf("chrome") !== -1 || combined.indexOf("chromium") !== -1 || combined.indexOf("brave") !== -1) return "󰊯"
+  if (combined.indexOf("discord") !== -1 || combined.indexOf("vesktop") !== -1) return "󰙯"
+  if (combined.indexOf("steam") !== -1 || combined.indexOf("game") !== -1) return "󰊴"
+  if (combined.indexOf("mpv") !== -1 || combined.indexOf("vlc") !== -1 || combined.indexOf("video") !== -1) return "󰕼"
+  return "󰕾"
+}
+
 function streamRepresentsPlayer(node, player, players, streams) {
   if (!node || !player) return false
   var playerLabel = mprisPlayerLabel(player)
@@ -301,23 +341,6 @@ function streamRepresentsPlayer(node, player, players, streams) {
   var label = rawStreamLabel(node)
   if (!streamLabelIsGeneric(label)) return streamRepresentsMprisPlayer(label, playerLabel)
   return streamRepresentsMprisPlayer(streamLabel(node, players, streams), playerLabel)
-}
-
-function streamGlyph(node, players) {
-  if (!node) return "󰓃"
-  var label = (streamLabel(node, players, []) || rawStreamLabel(node) || "").toLowerCase()
-  var p = nodeProps(node)
-  var bin = String(p["application.process.binary"] || "").toLowerCase()
-  var full = label + " " + bin
-
-  if (full.indexOf("spotify") !== -1) return "󰓇"
-  if (full.indexOf("discord") !== -1 || full.indexOf("vesktop") !== -1 || full.indexOf("webcord") !== -1) return "󰙯"
-  if (full.indexOf("firefox") !== -1 || full.indexOf("zen") !== -1 || full.indexOf("librewolf") !== -1) return "󰈹"
-  if (full.indexOf("chrome") !== -1 || full.indexOf("chromium") !== -1 || full.indexOf("brave") !== -1) return "󰊯"
-  if (full.indexOf("vlc") !== -1 || full.indexOf("mpv") !== -1 || full.indexOf("celluloid") !== -1) return "󰕼"
-  if (full.indexOf("game") !== -1 || full.indexOf("steam") !== -1 || full.indexOf("retroarch") !== -1) return "󰊗"
-  if (full.indexOf("cliamp") !== -1 || full.indexOf("music") !== -1 || full.indexOf("amberol") !== -1) return "󰎆"
-  return "󰓃"
 }
 
 function streamIsLinkedToSink(streamNode, sinkNode, streamLinks) {
@@ -354,6 +377,8 @@ if (typeof module !== "undefined") {
     parseCardProfiles: parseCardProfiles,
     parseStreamLinks: parseStreamLinks,
     parseRenames: parseRenames,
+    parseSimultaneousSlaves: parseSimultaneousSlaves,
+    isSinkInSimultaneous: isSinkInSimultaneous,
     friendlyDeviceLabel: friendlyDeviceLabel,
     nodeProps: nodeProps,
     isProAudioNode: isProAudioNode,
