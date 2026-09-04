@@ -161,7 +161,7 @@ print(json.dumps(slaves))
 
   set-simultaneous-sinks)
     python3 -c '
-import subprocess, json, sys
+import subprocess, json, sys, time
 
 raw_args = sys.argv[1:]
 target_sinks = []
@@ -247,24 +247,34 @@ if len(resolved_slaves) >= 2:
             subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
     except Exception:
         pass
-elif len(resolved_slaves) == 1:
-    target = resolved_slaves[0]
-    print(f"Setting single default output: {target}")
-    subprocess.run(["pactl", "set-default-sink", target])
-    subprocess.run(["pactl", "set-sink-mute", target, "0"])
-    res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-    try:
-        for inp in json.loads(res_inputs.stdout):
-            idx = str(inp.get("index"))
-            props = inp.get("properties", {})
-            if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                continue
-            subprocess.run(["pactl", "move-sink-input", idx, target], capture_output=True)
-            subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
-    except Exception:
-        pass
+else:
+    target = None
+    if resolved_slaves:
+        target = resolved_slaves[0]
+    else:
+        preferred = [s for s in physical_sinks if "pro-output-0" in s or "analog-stereo" in s or "hdmi" in s or "speaker" in s]
+        if preferred:
+            target = preferred[0]
+        elif physical_sinks:
+            target = physical_sinks[0]
+    if target:
+        print(f"Setting single default output: {target}")
+        subprocess.run(["pactl", "set-default-sink", target])
+        subprocess.run(["pactl", "set-sink-mute", target, "0"])
+        res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+        try:
+            for inp in json.loads(res_inputs.stdout):
+                idx = str(inp.get("index"))
+                props = inp.get("properties", {})
+                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
+                    continue
+                subprocess.run(["pactl", "move-sink-input", idx, target], capture_output=True)
+                subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+        except Exception:
+            pass
 
 # 5. Auto-resume any playing players if they were paused during graph migration
+time.sleep(0.05)
 if playing_players:
     for p in playing_players:
         subprocess.run(["playerctl", "-p", p, "play"], capture_output=True)
@@ -372,7 +382,7 @@ for inp in inputs:
   toggle-simultaneous)
     target_sink_arg="${1:-}"
     python3 -c '
-import subprocess, json, sys
+import subprocess, json, sys, time
 
 target_sink_arg = sys.argv[1] if len(sys.argv) > 1 else ""
 
@@ -456,6 +466,7 @@ else:
         except Exception:
             pass
 
+time.sleep(0.05)
 if playing_players:
     for p in playing_players:
         subprocess.run(["playerctl", "-p", p, "play"], capture_output=True)
