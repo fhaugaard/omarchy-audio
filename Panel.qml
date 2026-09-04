@@ -216,8 +216,28 @@ Panel {
     if (!volumeSinkProc.running) volumeSinkProc.running = true
   }
 
-  readonly property real outputVolume: volumeSink && volumeSink.audio ? volumeSink.audio.volume : 0
-  readonly property bool outputMuted: volumeSink && volumeSink.audio ? volumeSink.audio.muted : false
+  readonly property real outputVolume: {
+    if (root.isSimultaneousActive) {
+      for (var i = 0; i < displayAudioSinks.length; i++) {
+        var s = displayAudioSinks[i]
+        if (s && s.audio && Model.isSinkInSimultaneous(s, root.simultaneousSlaves)) {
+          return s.audio.volume
+        }
+      }
+    }
+    return volumeSink && volumeSink.audio ? volumeSink.audio.volume : (sink && sink.audio ? sink.audio.volume : 0)
+  }
+  readonly property bool outputMuted: {
+    if (root.isSimultaneousActive) {
+      for (var i = 0; i < displayAudioSinks.length; i++) {
+        var sm = displayAudioSinks[i]
+        if (sm && sm.audio && Model.isSinkInSimultaneous(sm, root.simultaneousSlaves)) {
+          return sm.audio.muted
+        }
+      }
+    }
+    return volumeSink && volumeSink.audio ? volumeSink.audio.muted : (sink && sink.audio ? sink.audio.muted : false)
+  }
   readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
   readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
 
@@ -229,7 +249,7 @@ Panel {
   property bool cursorActive: false
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
-  readonly property bool hasOutput: !!(volumeSink && volumeSink.audio)
+  readonly property bool hasOutput: root.isSimultaneousActive ? true : !!(volumeSink && volumeSink.audio)
   readonly property bool hasInput: !!(source && source.audio)
   readonly property bool anyAudible: (hasOutput && !outputMuted) || (hasInput && !inputMuted)
   readonly property string toggleHint: anyAudible ? "Mute" : "Unmute"
@@ -256,7 +276,7 @@ Panel {
   }
 
   function sectionHasSlider(section) {
-    if (section === "output") return !root.isSimultaneousActive
+    if (section === "output") return true
     if (section === "input") return !!source
     return false
   }
@@ -490,9 +510,25 @@ Panel {
   }
 
   function setOutputVolume(v) {
-    if (!volumeSink || !volumeSink.audio) return outputVolume
     var volume = Math.max(0, Math.min(1, v))
-    volumeSink.audio.volume = volume
+    if (root.isSimultaneousActive) {
+      for (var i = 0; i < displayAudioSinks.length; i++) {
+        var sNode = displayAudioSinks[i]
+        if (sNode && sNode.audio && Model.isSinkInSimultaneous(sNode, root.simultaneousSlaves)) {
+          sNode.audio.volume = volume
+        }
+      }
+      Quickshell.execDetached(["pactl", "set-sink-volume", "omarchy_combined", Math.round(volume * 100) + "%"])
+      return volume
+    }
+    if (volumeSink && volumeSink.audio) {
+      volumeSink.audio.volume = volume
+      return volume
+    }
+    if (sink && sink.audio) {
+      sink.audio.volume = volume
+      return volume
+    }
     return volume
   }
 
@@ -510,7 +546,19 @@ Panel {
   }
 
   function toggleOutputMute() {
+    if (root.isSimultaneousActive) {
+      var nextMute = !root.outputMuted
+      for (var i = 0; i < displayAudioSinks.length; i++) {
+        var sNode = displayAudioSinks[i]
+        if (sNode && sNode.audio && Model.isSinkInSimultaneous(sNode, root.simultaneousSlaves)) {
+          sNode.audio.muted = nextMute
+        }
+      }
+      Quickshell.execDetached(["pactl", "set-sink-mute", "omarchy_combined", nextMute ? "1" : "0"])
+      return
+    }
     if (volumeSink && volumeSink.audio) volumeSink.audio.muted = !volumeSink.audio.muted
+    else if (sink && sink.audio) sink.audio.muted = !sink.audio.muted
   }
 
   function toggleInputMute() {
