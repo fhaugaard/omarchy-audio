@@ -15,7 +15,9 @@ Commands:
   list-cards                                    List sound cards and their active profiles as JSON
   list-streams-and-links                        List active streams and their target sinks as JSON
   route-stream-to-sink <stream> <sink> [name]   Move application stream cleanly to target sink
-  toggle-simultaneous                           Toggle native simultaneous output across physical sinks
+  toggle-simultaneous [target_sink]             Toggle multi-output across physical sinks
+  set-simultaneous-sinks <sink1> <sink2> ...    Set custom subset of outputs for multi-output playback
+  get-simultaneous-sinks                        Get array of currently active multi-output target sinks as JSON
   set-sink-port <sink> <port>                   Switch sink port (e.g. Line Out / Headphones)
   reset-all                                     Reset all audio streams and profiles to safe defaults
 EOF
@@ -43,7 +45,7 @@ function unmute_alsa_card() {
 case "$cmd" in
   list-cards)
     python3 -c '
-import subprocess, json
+import subprocess, json, re, os
 
 try:
     res = subprocess.run(["pactl", "--format=json", "list", "cards"], capture_output=True, text=True, check=True)
@@ -57,11 +59,40 @@ try:
 except Exception:
     sinks_raw = []
 
+is_simultaneous_active = False
+multi_output_targets = []
+combined_volume = 1.0
+combined_muted = False
+original_sink = ""
 try:
-    res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
-    is_simultaneous_active = any("module-combine-sink" in line and "omarchy_combined" in line for line in res_mods.stdout.splitlines())
+    orig_path = os.path.expanduser("~/.config/omarchy/audio-original-sink")
+    if os.path.exists(orig_path):
+        with open(orig_path, "r", encoding="utf-8") as f:
+            original_sink = f.read().strip()
 except Exception:
-    is_simultaneous_active = False
+    pass
+
+try:
+    res_mods = subprocess.run(["pactl", "--format=json", "list", "modules"], capture_output=True, text=True)
+    mods = json.loads(res_mods.stdout) if res_mods.stdout else []
+    for m in mods:
+        if m.get("name") == "module-combine-sink" and "omarchy_combined" in m.get("argument", ""):
+            is_simultaneous_active = True
+            arg = m.get("argument", "")
+            # Note: 'slaves' is the literal module-combine-sink argument name in PulseAudio/PipeWire C API
+            match = re.search(r"slaves=([^\s]+)", arg)
+            if match:
+                multi_output_targets = [s.strip() for s in match.group(1).split(",") if s.strip()]
+except Exception:
+    pass
+
+for sk in sinks_raw:
+    if "omarchy_combined" in sk.get("name", ""):
+        v_obj = sk.get("volume", {}).get("front-left", {})
+        if v_obj and "value" in v_obj:
+            combined_volume = round(v_obj["value"] / 65536.0, 4)
+        combined_muted = bool(sk.get("mute", False))
+        break
 
 cards = []
 for c in cards_raw:
@@ -119,11 +150,255 @@ for c in cards_raw:
         "isProAudio": active == "pro-audio",
         "profiles": profiles,
         "cardSinks": card_sinks,
-        "isSimultaneous": is_simultaneous_active
+        "isSimultaneous": is_simultaneous_active,
+        "multiOutputTargets": multi_output_targets,
+        "simultaneousSlaves": multi_output_targets,
+        "combinedVolume": combined_volume,
+        "combinedMuted": combined_muted,
+        "originalSink": original_sink
     })
 
 print(json.dumps(cards, indent=2))
 '
+    ;;
+
+  get-simultaneous-sinks)
+    python3 -c '
+import subprocess, json, re
+
+targets = []
+try:
+    res_mods = subprocess.run(["pactl", "--format=json", "list", "modules"], capture_output=True, text=True)
+    mods = json.loads(res_mods.stdout) if res_mods.stdout else []
+    for m in mods:
+        if m.get("name") == "module-combine-sink" and "omarchy_combined" in m.get("argument", ""):
+            arg = m.get("argument", "")
+            # Note: 'slaves' is the literal module-combine-sink argument name in PulseAudio/PipeWire C API
+            match = re.search(r"slaves=([^\s]+)", arg)
+            if match:
+                targets = [s.strip() for s in match.group(1).split(",") if s.strip()]
+except Exception:
+    pass
+
+print(json.dumps(targets))
+'
+    ;;
+
+  set-simultaneous-sinks)
+    python3 -c '
+import subprocess, json, sys, time, os
+
+raw_args = sys.argv[1:]
+target_sinks = []
+for a in raw_args:
+    for s in a.split(","):
+        clean = s.strip()
+        if clean and clean not in target_sinks and "omarchy_combined" not in clean:
+            target_sinks.append(clean)
+
+ORIGINAL_SINK_FILE = os.path.expanduser("~/.config/omarchy/audio-original-sink")
+
+def wait_for_sink_presence(sink_name, present=True, timeout=1.5):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        s_list = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True).stdout
+        if (sink_name in s_list) == present:
+            return True
+        time.sleep(0.01)
+    return False
+
+def get_active_app_stream_ids():
+    res = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+    inputs = json.loads(res.stdout) if res.stdout else []
+    app_inputs = []
+    for inp in inputs:
+        props = inp.get("properties", {})
+        name = str(props.get("node.name", "")).lower()
+        media = str(props.get("media.name", "")).lower()
+        if props.get("module-combine-sink.sink") or "combine" in name or "combine" in media:
+            continue
+        app_inputs.append(str(inp.get("index")))
+    return app_inputs
+
+def wait_for_streams_migration(stream_indices, target_sink_name, timeout=1.5):
+    if not stream_indices:
+        return True
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        res_i = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+        inps = json.loads(res_i.stdout) if res_i.stdout else []
+        res_s = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
+        sinks = json.loads(res_s.stdout) if res_s.stdout else []
+        target_idx = None
+        for s in sinks:
+            if target_sink_name in s.get("name", ""):
+                target_idx = s.get("index")
+                break
+        if target_idx is not None:
+            all_moved = True
+            for idx in stream_indices:
+                matches = [i for i in inps if str(i.get("index")) == idx]
+                if not matches or matches[0].get("sink") != target_idx:
+                    all_moved = False
+                    break
+            if all_moved:
+                return True
+        time.sleep(0.01)
+    return False
+
+res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
+comb_mods = []
+for line in res_mods.stdout.splitlines():
+    parts = line.split("\t")
+    if len(parts) >= 2 and "module-combine-sink" in parts[1] and "omarchy_combined" in line:
+        comb_mods.append(parts[0].strip())
+
+res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
+sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
+physical_sinks = [s.get("name") for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+
+# Capture existing combine sink volume & mute if active to preserve across reloads
+prev_vol_pct = None
+prev_muted = False
+for s in sinks_data:
+    if "omarchy_combined" in s.get("name", ""):
+        v_obj = s.get("volume", {}).get("front-left", {})
+        if v_obj and "value_percent" in v_obj:
+            prev_vol_pct = v_obj["value_percent"]
+        prev_muted = bool(s.get("mute", False))
+        break
+
+def is_preferred_sink(name):
+    n = name.lower()
+    return "pro-output" in n or "analog-stereo" in n or "speaker" in n or "hdmi" in n
+
+preferred_sinks = [s for s in physical_sinks if is_preferred_sink(s) and "direct" not in s.lower()]
+safe_physical = preferred_sinks[0] if preferred_sinks else (physical_sinks[0] if physical_sinks else None)
+
+# Resolve requested target sinks
+resolved_targets = []
+for target in target_sinks:
+    if target in physical_sinks:
+        resolved_targets.append(target)
+    else:
+        for s in sinks_data:
+            if str(s.get("index")) == target or str(s.get("properties", {}).get("object.id")) == target:
+                name = s.get("name")
+                if name and name in physical_sinks and name not in resolved_targets:
+                    resolved_targets.append(name)
+                    break
+
+# Fallback sink for safe handover
+fallback_sink = resolved_targets[0] if resolved_targets else safe_physical
+
+# 1. Seamless handover: Migrate active streams to fallback physical sink before dismantling old combine module
+if comb_mods and fallback_sink:
+    app_streams = get_active_app_stream_ids()
+    if app_streams:
+        subprocess.run(["pactl", "set-default-sink", fallback_sink], capture_output=True)
+        for idx in app_streams:
+            subprocess.run(["pactl", "move-sink-input", idx, fallback_sink], capture_output=True)
+            subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+        wait_for_streams_migration(app_streams, fallback_sink)
+
+# 2. Unload old combine modules and wait for teardown to finish
+for m in comb_mods:
+    subprocess.run(["pactl", "unload-module", str(m)], capture_output=True)
+if comb_mods:
+    wait_for_sink_presence("omarchy_combined", present=False)
+
+# 3. Provision new state
+if len(resolved_targets) >= 2:
+    # Save current default physical sink before switching to multi-output (if not already omarchy_combined)
+    if not comb_mods:
+        res_def = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True)
+        curr_def = res_def.stdout.strip() if res_def.stdout else ""
+        if curr_def and "omarchy_combined" not in curr_def and curr_def in physical_sinks:
+            try:
+                os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+                with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                    f.write(curr_def)
+            except Exception:
+                pass
+        elif resolved_targets:
+            try:
+                os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+                with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                    f.write(resolved_targets[0])
+            except Exception:
+                pass
+
+    targets_str = ",".join(resolved_targets)
+    print(f"Enabling custom multi-output playback across: {targets_str}")
+    # Wake up all target sinks to avoid suspend/sleep latency (e.g. USB DACs, Bluetooth)
+    for target in resolved_targets:
+        subprocess.run(["pactl", "suspend-sink", target, "0"], capture_output=True)
+
+    # Note: 'slaves=' is the literal module argument name in PulseAudio/PipeWire module-combine-sink C API
+    subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={targets_str}", "sink_properties=device.description=Multi-Output"], capture_output=True)
+    wait_for_sink_presence("omarchy_combined", present=True)
+    subprocess.run(["pactl", "suspend-sink", "omarchy_combined", "0"], capture_output=True)
+    subprocess.run(["pactl", "set-default-sink", "omarchy_combined"], capture_output=True)
+    
+    if prev_vol_pct:
+        subprocess.run(["pactl", "set-sink-volume", "omarchy_combined", prev_vol_pct], capture_output=True)
+        subprocess.run(["pactl", "set-sink-mute", "omarchy_combined", "1" if prev_muted else "0"], capture_output=True)
+    
+    for target in resolved_targets:
+        subprocess.run(["pactl", "set-sink-mute", target, "0"], capture_output=True)
+        
+    app_streams = get_active_app_stream_ids()
+    if app_streams:
+        for idx in app_streams:
+            subprocess.run(["pactl", "move-sink-input", idx, "omarchy_combined"], capture_output=True)
+            subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+        wait_for_streams_migration(app_streams, "omarchy_combined")
+else:
+    target = resolved_targets[0] if resolved_targets else None
+    # If no explicit target provided or explicitly requested "original", restore saved pre-multi-output sink
+    if not target or target == "original":
+        if os.path.exists(ORIGINAL_SINK_FILE):
+            try:
+                with open(ORIGINAL_SINK_FILE, "r", encoding="utf-8") as f:
+                    saved = f.read().strip()
+                    if saved and saved in physical_sinks:
+                        target = saved
+            except Exception:
+                pass
+    if not target:
+        target = safe_physical
+
+    if target:
+        print(f"Setting single default output: {target}")
+        # Save as active single sink
+        try:
+            os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+            with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                f.write(target)
+        except Exception:
+            pass
+
+        subprocess.run(["pactl", "suspend-sink", target, "0"], capture_output=True)
+        subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
+        subprocess.run(["pactl", "set-sink-mute", target, "0"], capture_output=True)
+
+        # Restore unattenuated physical volume if flat-volumes scaled down the sink
+        target_s_info = next((s for s in sinks_data if s.get("name") == target), None)
+        target_vol_val = 0
+        if target_s_info:
+            target_vol_val = target_s_info.get("volume", {}).get("front-left", {}).get("value", 0)
+        if target_vol_val == 0 and prev_vol_pct:
+            subprocess.run(["pactl", "set-sink-volume", target, prev_vol_pct], capture_output=True)
+        elif target_vol_val == 0:
+            subprocess.run(["pactl", "set-sink-volume", target, "100%"], capture_output=True)
+
+        app_streams = get_active_app_stream_ids()
+        if app_streams:
+            for idx in app_streams:
+                subprocess.run(["pactl", "move-sink-input", idx, target], capture_output=True)
+                subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+            wait_for_streams_migration(app_streams, target)
+' "$@"
     ;;
 
   list-streams-and-links)
@@ -138,7 +413,7 @@ except Exception:
 
 try:
     res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
-    sinks_dict = {s.get("index"): s.get("name") for s in json.loads(res_sinks.stdout)}
+    sinks_dict = {s.get("index"): s.get("name") for s in json.loads(res_sinks.stdout)} if res_sinks.stdout else {}
 except Exception:
     sinks_dict = {}
 
@@ -153,11 +428,13 @@ for inp in inputs:
     media = props.get("media.name") or ""
     inp_id = str(inp.get("index"))
     obj_id = str(props.get("object.id") or "")
-    serial = str(props.get("object.serial") or "")
     
-    for key in [app, node_name, media, inp_id, obj_id, serial]:
+    for key in [app, node_name, media, inp_id, obj_id]:
         if key:
-            stream_links[key] = [sink_name]
+            if key not in stream_links:
+                stream_links[key] = []
+            if sink_name and sink_name not in stream_links[key]:
+                stream_links[key].append(sink_name)
 
 print(json.dumps(stream_links, indent=2))
 '
@@ -225,9 +502,58 @@ for inp in inputs:
   toggle-simultaneous)
     target_sink_arg="${1:-}"
     python3 -c '
-import subprocess, json, sys
+import subprocess, json, sys, time, os
 
 target_sink_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+ORIGINAL_SINK_FILE = os.path.expanduser("~/.config/omarchy/audio-original-sink")
+
+def wait_for_sink_presence(sink_name, present=True, timeout=1.5):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        s_list = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True).stdout
+        if (sink_name in s_list) == present:
+            return True
+        time.sleep(0.01)
+    return False
+
+def get_active_app_stream_ids():
+    res = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+    inputs = json.loads(res.stdout) if res.stdout else []
+    app_inputs = []
+    for inp in inputs:
+        props = inp.get("properties", {})
+        name = str(props.get("node.name", "")).lower()
+        media = str(props.get("media.name", "")).lower()
+        if props.get("module-combine-sink.sink") or "combine" in name or "combine" in media:
+            continue
+        app_inputs.append(str(inp.get("index")))
+    return app_inputs
+
+def wait_for_streams_migration(stream_indices, target_sink_name, timeout=1.5):
+    if not stream_indices:
+        return True
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        res_i = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+        inps = json.loads(res_i.stdout) if res_i.stdout else []
+        res_s = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
+        sinks = json.loads(res_s.stdout) if res_s.stdout else []
+        target_idx = None
+        for s in sinks:
+            if target_sink_name in s.get("name", ""):
+                target_idx = s.get("index")
+                break
+        if target_idx is not None:
+            all_moved = True
+            for idx in stream_indices:
+                matches = [i for i in inps if str(i.get("index")) == idx]
+                if not matches or matches[0].get("sink") != target_idx:
+                    all_moved = False
+                    break
+            if all_moved:
+                return True
+        time.sleep(0.01)
+    return False
 
 res_mods = subprocess.run(["pactl", "list", "modules", "short"], capture_output=True, text=True)
 comb_mods = []
@@ -236,83 +562,97 @@ for line in res_mods.stdout.splitlines():
     if len(parts) >= 2 and "module-combine-sink" in parts[1] and "omarchy_combined" in line:
         comb_mods.append(parts[0].strip())
 
+res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
+sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
+physical_sinks = [s.get("name") for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+
+def is_preferred_sink(name):
+    n = name.lower()
+    return "pro-output" in n or "analog-stereo" in n or "speaker" in n or "hdmi" in n
+
+preferred_sinks = [s for s in physical_sinks if is_preferred_sink(s) and "direct" not in s.lower()]
+safe_physical = preferred_sinks[0] if preferred_sinks else (physical_sinks[0] if physical_sinks else None)
+
 if comb_mods:
     print("Disabling simultaneous playback...")
-    res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
-    sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
-    physical_sinks = [s for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
+    target = target_sink_arg if (target_sink_arg and target_sink_arg in physical_sinks) else None
+    if not target and os.path.exists(ORIGINAL_SINK_FILE):
+        try:
+            with open(ORIGINAL_SINK_FILE, "r", encoding="utf-8") as f:
+                saved = f.read().strip()
+                if saved and saved in physical_sinks:
+                    target = saved
+        except Exception:
+            pass
+    if not target:
+        target = safe_physical
 
-    sink_vols = {}
-    for s in physical_sinks:
-        v_pct = s.get("volume", {}).get("front-left", {}).get("value_percent")
-        if v_pct:
-            sink_vols[s.get("name")] = v_pct
+    if target:
+        try:
+            os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+            with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                f.write(target)
+        except Exception:
+            pass
 
+    app_streams = get_active_app_stream_ids()
+    if app_streams and target:
+        subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
+        for idx in app_streams:
+            subprocess.run(["pactl", "move-sink-input", idx, target], capture_output=True)
+            subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+        wait_for_streams_migration(app_streams, target)
+        
     for m in comb_mods:
-        subprocess.run(["pactl", "unload-module", str(m)])
-
-    selected_sink = None
-    if target_sink_arg:
-        for s in physical_sinks:
-            if s.get("name") == target_sink_arg or str(s.get("index")) == target_sink_arg:
-                selected_sink = s
-                break
-    if not selected_sink:
-        # Prefer an unmuted physical sink first
-        unmuted_sinks = [s for s in physical_sinks if not s.get("mute", False)]
-        if unmuted_sinks:
-            selected_sink = unmuted_sinks[0]
-        elif physical_sinks:
-            selected_sink = physical_sinks[0]
-
-    if selected_sink:
-        sink_name = selected_sink.get("name")
-        subprocess.run(["pactl", "set-default-sink", sink_name])
-        subprocess.run(["pactl", "set-sink-mute", sink_name, "0"])
-        res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
-        try:
-            for inp in json.loads(res_inputs.stdout):
-                props = inp.get("properties", {})
-                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                    continue
-                subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), sink_name], capture_output=True)
-        except Exception:
-            pass
+        subprocess.run(["pactl", "unload-module", str(m)], capture_output=True)
+    wait_for_sink_presence("omarchy_combined", present=False)
     
-    for sname, svol in sink_vols.items():
-        subprocess.run(["pactl", "set-sink-volume", sname, svol], capture_output=True)
-
+    if target:
+        subprocess.run(["pactl", "suspend-sink", target, "0"], capture_output=True)
+        subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
+        subprocess.run(["pactl", "set-sink-mute", target, "0"], capture_output=True)
 else:
-    print("Enabling simultaneous playback...")
-    res_sinks = subprocess.run(["pactl", "--format=json", "list", "sinks"], capture_output=True, text=True)
-    sinks_data = json.loads(res_sinks.stdout) if res_sinks.stdout else []
-    physical_sinks = [s for s in sinks_data if "omarchy_combined" not in s.get("name", "")]
-
-    sink_vols = {}
-    for s in physical_sinks:
-        v_pct = s.get("volume", {}).get("front-left", {}).get("value_percent")
-        if v_pct:
-            sink_vols[s.get("name")] = v_pct
-
-    if len(physical_sinks) >= 2:
-        slaves = ",".join([s.get("name") for s in physical_sinks])
-        res = subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves}", "sink_properties=device.description=Simultaneous\\ Output\\ (All\\ Devices)"], capture_output=True, text=True)
-        subprocess.run(["pactl", "set-default-sink", "omarchy_combined"])
-        subprocess.run(["pactl", "set-sink-volume", "omarchy_combined", "100%"])
-        subprocess.run(["pactl", "set-sink-mute", "omarchy_combined", "0"])
-
-        for sname, svol in sink_vols.items():
-            subprocess.run(["pactl", "set-sink-volume", sname, svol], capture_output=True)
-
-        res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
+    print("Enabling simultaneous playback across all devices...")
+    # Preserve original single sink before enabling simultaneous playback
+    res_def = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True)
+    curr_def = res_def.stdout.strip() if res_def.stdout else ""
+    if curr_def and "omarchy_combined" not in curr_def and curr_def in physical_sinks:
         try:
-            for inp in json.loads(res_inputs.stdout):
-                props = inp.get("properties", {})
-                if props.get("module-combine-sink.sink") or "combine" in str(props.get("node.name", "")).lower():
-                    continue
-                subprocess.run(["pactl", "move-sink-input", str(inp.get("index")), "omarchy_combined"], capture_output=True)
+            os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+            with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                f.write(curr_def)
         except Exception:
             pass
+
+    active_targets = preferred_sinks if len(preferred_sinks) >= 2 else physical_sinks
+    if len(active_targets) >= 2:
+        fallback = active_targets[0]
+        app_streams = get_active_app_stream_ids()
+        if app_streams:
+            subprocess.run(["pactl", "set-default-sink", fallback], capture_output=True)
+            for idx in app_streams:
+                subprocess.run(["pactl", "move-sink-input", idx, fallback], capture_output=True)
+                subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+            wait_for_streams_migration(app_streams, fallback)
+            
+        targets_str = ",".join(active_targets)
+        for s in active_targets:
+            subprocess.run(["pactl", "suspend-sink", s, "0"], capture_output=True)
+
+        # Note: 'slaves=' is the literal module argument name in PulseAudio/PipeWire module-combine-sink C API
+        subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={targets_str}", "sink_properties=device.description=Multi-Output\\ (All\\ Devices)"], capture_output=True)
+        wait_for_sink_presence("omarchy_combined", present=True)
+        subprocess.run(["pactl", "suspend-sink", "omarchy_combined", "0"], capture_output=True)
+        subprocess.run(["pactl", "set-default-sink", "omarchy_combined"], capture_output=True)
+        
+        for s in active_targets:
+            subprocess.run(["pactl", "set-sink-mute", s, "0"], capture_output=True)
+            
+        if app_streams:
+            for idx in app_streams:
+                subprocess.run(["pactl", "move-sink-input", idx, "omarchy_combined"], capture_output=True)
+                subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
+            wait_for_streams_migration(app_streams, "omarchy_combined")
 ' "$target_sink_arg"
     ;;
 

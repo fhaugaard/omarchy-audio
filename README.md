@@ -26,9 +26,12 @@ This plugin extends Omarchy's native `omarchy.audio` bar widget with **direct in
 - **Adaptive Device Glyphs**: Contextual icons for headphones (`󰋋`), Bluetooth (`󰂯`), HDMI/DisplayPort (`󰍹`), webcams (`󰄀`), and speakers (`󰓃`).
 - **DSP & Tuning Sink Awareness**: Correctly resolves physical devices through virtual speaker tunings, EasyEffects, and DSP sinks.
 
-### 🔀 Multi-Device Output Routing & Simultaneous Playback
+### 🔀 Multi-Device Output Routing & Multi-Output Playback
 - **Per-Application Routing**: Route individual applications (Discord, Spotify, games, web browsers) to any connected output device via the expandable **󰌹 Route** matrix with instantaneous optimistic updates.
-- **Simultaneous Output**: One-click toggle to play audio through all connected outputs simultaneously via native `module-combine-sink` with unity volume preservation and independent per-device fine-tuning.
+- **Custom Multi-Output**: Select any custom subset of connected devices (e.g. Desktop Speakers + Monitor HDMI) or click **"Select all"** to play synchronized audio across chosen outputs simultaneously via PipeWire's native `module-combine-sink` with independent per-device fine-tuning.
+
+> [!NOTE]
+> **Known Behavior**: When selecting more than 2 audio devices or deselecting devices in multi-select mode, active playback audio may pause depending on the sound server and application stream state.
 
 ### 🎛️ Top-Aligned Playback Sources & Solo Mode
 - **Collapsible by Default with Inline Chiron**: Features a sleek, continuous animated marquee ticker directly on the header line displaying active sources (`Spotify, Firefox, Discord, ...`), and expands on click to reveal full cards.
