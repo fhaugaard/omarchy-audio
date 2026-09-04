@@ -1289,8 +1289,8 @@ Panel {
 
                       Text {
                         text: root.isSimultaneousActive
-                          ? ("Simultaneous Active (" + root.simultaneousSlaves.length + " outputs)")
-                          : "Simultaneous Playback"
+                          ? ("Multi-Output Active (" + root.simultaneousSlaves.length + " outputs)")
+                          : "Multi-Output"
                         color: root.isSimultaneousActive ? Color.accent : root.bar.foreground
                         font.family: root.bar.fontFamily
                         font.pixelSize: Style.font.caption

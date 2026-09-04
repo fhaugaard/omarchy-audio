@@ -201,8 +201,8 @@ for m in comb_mods:
 
 if len(resolved_slaves) >= 2:
     slaves_str = ",".join(resolved_slaves)
-    print(f"Enabling custom simultaneous playback across: {slaves_str}")
-    subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves_str}", "sink_properties=device.description=Simultaneous\\ Output"])
+    print(f"Enabling custom multi-output playback across: {slaves_str}")
+    subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves_str}", "sink_properties=device.description=Multi-Output"])
     subprocess.run(["pactl", "set-default-sink", "omarchy_combined"])
     res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
     try:
@@ -391,7 +391,7 @@ else:
 
     if len(physical_sinks) >= 2:
         slaves = ",".join(physical_sinks)
-        res = subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves}", "sink_properties=device.description=Simultaneous\\ Output\\ (All\\ Devices)"], capture_output=True, text=True)
+        res = subprocess.run(["pactl", "load-module", "module-combine-sink", "sink_name=omarchy_combined", f"slaves={slaves}", "sink_properties=device.description=Multi-Output\\ (All\\ Devices)"], capture_output=True, text=True)
         subprocess.run(["pactl", "set-default-sink", "omarchy_combined"])
         res_inputs = subprocess.run(["pactl", "--format=json", "list", "sink-inputs"], capture_output=True, text=True)
         try:
