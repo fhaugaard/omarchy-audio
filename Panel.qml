@@ -86,15 +86,6 @@ Panel {
     }
     return false
   }
-
-  onSinkChanged: {
-    if (sink && !root.isSimultaneousActive) {
-      var sName = String(sink.name || "")
-      if (sName && sName.indexOf("omarchy_combined") === -1) {
-        root.originalSingleOutputSink = sName
-      }
-    }
-  }
   property var streamLinks: ({})
   property var customRenames: ({})
   property string soloStreamId: ""
@@ -225,7 +216,15 @@ Panel {
     return sink
   }
 
-  onSinkChanged: resolveVolumeSink()
+  onSinkChanged: {
+    resolveVolumeSink()
+    if (sink && !root.isSimultaneousActive) {
+      var sName = String(sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
+  }
 
   function resolveVolumeSink() {
     if (!volumeSinkProc.running) volumeSinkProc.running = true
@@ -1405,13 +1404,13 @@ Panel {
                         font.bold: true
                         anchors.verticalCenter: parent.verticalCenter
                       }
+                    }
 
-                      MouseArea {
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.expandMultiOutput = !root.expandMultiOutput
-                      }
+                    MouseArea {
+                      anchors.fill: simulTitleRow
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.expandMultiOutput = !root.expandMultiOutput
                     }
 
                     Row {
