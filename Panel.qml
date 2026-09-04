@@ -69,6 +69,7 @@ Panel {
   property bool expandStreams: false
   property var soundCards: []
   property var multiOutputTargets: []
+  property string originalSingleOutputSink: ""
   // Backward compatibility alias for multiOutputTargets
   readonly property var simultaneousSlaves: multiOutputTargets
   property double lastSimultaneousUserAction: 0
@@ -84,6 +85,15 @@ Panel {
       if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
     }
     return false
+  }
+
+  onSinkChanged: {
+    if (sink && !root.isSimultaneousActive) {
+      var sName = String(sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
   }
   property var streamLinks: ({})
   property var customRenames: ({})
@@ -566,6 +576,9 @@ Panel {
     if (!node) return
     var sinkName = String(node.name || "")
     var sinkId = String(node.id !== undefined ? node.id : "")
+    if (!root.isSimultaneousActive && sinkName && sinkName.indexOf("omarchy_combined") === -1) {
+      root.originalSingleOutputSink = sinkName
+    }
     if (root.isSimultaneousActive) {
       root.multiOutputTargets = [sinkName]
       Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", sinkName])
@@ -697,6 +710,12 @@ Panel {
   }
 
   function toggleSimultaneous() {
+    if (!root.isSimultaneousActive && root.sink) {
+      var sName = String(root.sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
     Quickshell.execDetached([root.routingBin, "toggle-simultaneous"])
     Qt.callLater(function() {
       refreshRoutingState()
@@ -710,6 +729,13 @@ Panel {
     root.expandMultiOutput = true
     var name = String(sinkNode.name || "")
     
+    if (!root.isSimultaneousActive && root.sink) {
+      var sName = String(root.sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
+
     var current = []
     if (root.isSimultaneousActive) {
       current = (root.multiOutputTargets || []).slice()
@@ -796,6 +822,14 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.soundCards = Model.parseCardProfiles(text)
+        for (var c = 0; c < root.soundCards.length; c++) {
+          if (root.soundCards[c] && root.soundCards[c].originalSink) {
+            if (!root.originalSingleOutputSink || !root.isSimultaneousActive) {
+              root.originalSingleOutputSink = root.soundCards[c].originalSink
+            }
+            break
+          }
+        }
         if (Date.now() - root.lastSimultaneousUserAction > 1500) {
           var targets = []
           for (var i = 0; i < root.soundCards.length; i++) {
@@ -811,6 +845,9 @@ Panel {
             root.multiOutputTargets = targets
           } else if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) {
             root.multiOutputTargets = [String(root.sink.name)]
+            if (!root.originalSingleOutputSink) {
+              root.originalSingleOutputSink = String(root.sink.name)
+            }
           }
         }
         if (Date.now() - root.lastMasterVolumeUserAction > 1500) {
@@ -1399,8 +1436,48 @@ Panel {
                           hoverEnabled: true
                           cursorShape: Qt.PointingHandCursor
                           onClicked: {
-                            var target = (root.sink && !root.isSimultaneousActive) ? String(root.sink.name || "") : (root.displayAudioSinks.length > 0 ? String(root.displayAudioSinks[0].name || "") : "")
-                            root.multiOutputTargets = target ? [target] : []
+                            var target = ""
+                            // 1. Prioritize original output active before multi-select was entered
+                            if (root.originalSingleOutputSink) {
+                              for (var s = 0; s < root.displayAudioSinks.length; s++) {
+                                if (root.displayAudioSinks[s] && String(root.displayAudioSinks[s].name || "") === root.originalSingleOutputSink) {
+                                  target = root.originalSingleOutputSink
+                                  break
+                                }
+                              }
+                            }
+                            // 2. Fallback to first member of current multi-output group
+                            if (!target && root.multiOutputTargets && root.multiOutputTargets.length > 0) {
+                              for (var m = 0; m < root.multiOutputTargets.length; m++) {
+                                var candidate = root.multiOutputTargets[m]
+                                for (var s2 = 0; s2 < root.displayAudioSinks.length; s2++) {
+                                  if (root.displayAudioSinks[s2] && String(root.displayAudioSinks[s2].name || "") === candidate) {
+                                    target = candidate
+                                    break
+                                  }
+                                }
+                                if (target) break
+                              }
+                            }
+                            // 3. Fallback to first display audio sink
+                            if (!target && root.displayAudioSinks.length > 0) {
+                              target = String(root.displayAudioSinks[0].name || "")
+                            }
+                            if (!target) return
+
+                            root.multiOutputTargets = [target]
+                            var targetNode = null
+                            for (var k = 0; k < root.displayAudioSinks.length; k++) {
+                              if (root.displayAudioSinks[k] && String(root.displayAudioSinks[k].name || "") === target) {
+                                targetNode = root.displayAudioSinks[k]
+                                break
+                              }
+                            }
+                            if (targetNode) {
+                              Pipewire.preferredDefaultAudioSink = targetNode
+                              if (targetNode.audio) targetNode.audio.muted = false
+                            }
+
                             Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", target])
                             Qt.callLater(function() {
                               refreshRoutingState()

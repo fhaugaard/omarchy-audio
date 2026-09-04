@@ -45,7 +45,7 @@ function unmute_alsa_card() {
 case "$cmd" in
   list-cards)
     python3 -c '
-import subprocess, json, re
+import subprocess, json, re, os
 
 try:
     res = subprocess.run(["pactl", "--format=json", "list", "cards"], capture_output=True, text=True, check=True)
@@ -63,6 +63,15 @@ is_simultaneous_active = False
 multi_output_targets = []
 combined_volume = 1.0
 combined_muted = False
+original_sink = ""
+try:
+    orig_path = os.path.expanduser("~/.config/omarchy/audio-original-sink")
+    if os.path.exists(orig_path):
+        with open(orig_path, "r", encoding="utf-8") as f:
+            original_sink = f.read().strip()
+except Exception:
+    pass
+
 try:
     res_mods = subprocess.run(["pactl", "--format=json", "list", "modules"], capture_output=True, text=True)
     mods = json.loads(res_mods.stdout) if res_mods.stdout else []
@@ -145,7 +154,8 @@ for c in cards_raw:
         "multiOutputTargets": multi_output_targets,
         "simultaneousSlaves": multi_output_targets,
         "combinedVolume": combined_volume,
-        "combinedMuted": combined_muted
+        "combinedMuted": combined_muted,
+        "originalSink": original_sink
     })
 
 print(json.dumps(cards, indent=2))
@@ -176,7 +186,7 @@ print(json.dumps(targets))
 
   set-simultaneous-sinks)
     python3 -c '
-import subprocess, json, sys, time
+import subprocess, json, sys, time, os
 
 raw_args = sys.argv[1:]
 target_sinks = []
@@ -185,6 +195,8 @@ for a in raw_args:
         clean = s.strip()
         if clean and clean not in target_sinks and "omarchy_combined" not in clean:
             target_sinks.append(clean)
+
+ORIGINAL_SINK_FILE = os.path.expanduser("~/.config/omarchy/audio-original-sink")
 
 def wait_for_sink_presence(sink_name, present=True, timeout=1.5):
     t0 = time.time()
@@ -297,6 +309,25 @@ if comb_mods:
 
 # 3. Provision new state
 if len(resolved_targets) >= 2:
+    # Save current default physical sink before switching to multi-output (if not already omarchy_combined)
+    if not comb_mods:
+        res_def = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True)
+        curr_def = res_def.stdout.strip() if res_def.stdout else ""
+        if curr_def and "omarchy_combined" not in curr_def and curr_def in physical_sinks:
+            try:
+                os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+                with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                    f.write(curr_def)
+            except Exception:
+                pass
+        elif resolved_targets:
+            try:
+                os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+                with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                    f.write(resolved_targets[0])
+            except Exception:
+                pass
+
     targets_str = ",".join(resolved_targets)
     print(f"Enabling custom multi-output playback across: {targets_str}")
     # Wake up all target sinks to avoid suspend/sleep latency (e.g. USB DACs, Bluetooth)
@@ -323,9 +354,30 @@ if len(resolved_targets) >= 2:
             subprocess.run(["pactl", "set-sink-input-mute", idx, "0"], capture_output=True)
         wait_for_streams_migration(app_streams, "omarchy_combined")
 else:
-    target = resolved_targets[0] if resolved_targets else safe_physical
+    target = resolved_targets[0] if resolved_targets else None
+    # If no explicit target provided or explicitly requested "original", restore saved pre-multi-output sink
+    if not target or target == "original":
+        if os.path.exists(ORIGINAL_SINK_FILE):
+            try:
+                with open(ORIGINAL_SINK_FILE, "r", encoding="utf-8") as f:
+                    saved = f.read().strip()
+                    if saved and saved in physical_sinks:
+                        target = saved
+            except Exception:
+                pass
+    if not target:
+        target = safe_physical
+
     if target:
         print(f"Setting single default output: {target}")
+        # Save as active single sink
+        try:
+            os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+            with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                f.write(target)
+        except Exception:
+            pass
+
         subprocess.run(["pactl", "suspend-sink", target, "0"], capture_output=True)
         subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
         subprocess.run(["pactl", "set-sink-mute", target, "0"], capture_output=True)
@@ -450,9 +502,10 @@ for inp in inputs:
   toggle-simultaneous)
     target_sink_arg="${1:-}"
     python3 -c '
-import subprocess, json, sys, time
+import subprocess, json, sys, time, os
 
 target_sink_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+ORIGINAL_SINK_FILE = os.path.expanduser("~/.config/omarchy/audio-original-sink")
 
 def wait_for_sink_presence(sink_name, present=True, timeout=1.5):
     t0 = time.time()
@@ -522,8 +575,26 @@ safe_physical = preferred_sinks[0] if preferred_sinks else (physical_sinks[0] if
 
 if comb_mods:
     print("Disabling simultaneous playback...")
-    target = target_sink_arg if (target_sink_arg and target_sink_arg in physical_sinks) else safe_physical
-    
+    target = target_sink_arg if (target_sink_arg and target_sink_arg in physical_sinks) else None
+    if not target and os.path.exists(ORIGINAL_SINK_FILE):
+        try:
+            with open(ORIGINAL_SINK_FILE, "r", encoding="utf-8") as f:
+                saved = f.read().strip()
+                if saved and saved in physical_sinks:
+                    target = saved
+        except Exception:
+            pass
+    if not target:
+        target = safe_physical
+
+    if target:
+        try:
+            os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+            with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                f.write(target)
+        except Exception:
+            pass
+
     app_streams = get_active_app_stream_ids()
     if app_streams and target:
         subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
@@ -542,6 +613,17 @@ if comb_mods:
         subprocess.run(["pactl", "set-sink-mute", target, "0"], capture_output=True)
 else:
     print("Enabling simultaneous playback across all devices...")
+    # Preserve original single sink before enabling simultaneous playback
+    res_def = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True)
+    curr_def = res_def.stdout.strip() if res_def.stdout else ""
+    if curr_def and "omarchy_combined" not in curr_def and curr_def in physical_sinks:
+        try:
+            os.makedirs(os.path.dirname(ORIGINAL_SINK_FILE), exist_ok=True)
+            with open(ORIGINAL_SINK_FILE, "w", encoding="utf-8") as f:
+                f.write(curr_def)
+        except Exception:
+            pass
+
     active_targets = preferred_sinks if len(preferred_sinks) >= 2 else physical_sinks
     if len(active_targets) >= 2:
         fallback = active_targets[0]
