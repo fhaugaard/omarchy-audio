@@ -4,7 +4,10 @@ import sys, subprocess, struct, math, time, os, signal, json
 def get_default_sink():
     try:
         res = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True, timeout=1)
-        return res.stdout.strip() if res.stdout else ""
+        s = res.stdout.strip() if res.stdout else ""
+        if s.endswith(".monitor"):
+            s = s[:-8]
+        return s
     except Exception:
         return ""
 
@@ -15,25 +18,92 @@ def get_default_source():
     except Exception:
         return ""
 
-raw_target = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "output"
+def get_all_sinks():
+    try:
+        res = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=1)
+        sinks = []
+        for line in res.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                s = parts[1]
+                if s.endswith(".monitor"):
+                    s = s[:-8]
+                sinks.append(s)
+        return sinks
+    except Exception:
+        return []
+
+def get_active_stream(hint=""):
+    try:
+        res = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, timeout=1)
+        blocks = res.stdout.split("Sink Input #")
+        candidates = []
+        for b in blocks[1:]:
+            lines = b.splitlines()
+            serial = lines[0].strip()
+            props = {}
+            for line in lines[1:]:
+                line = line.strip()
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    props[k.strip()] = v.strip().strip('"')
+            node_name = props.get("node.name", "")
+            app_name = props.get("application.name", "")
+            candidates.append({"serial": serial, "node_name": node_name, "app_name": app_name})
+        
+        if hint and hint != "stream":
+            hint_low = hint.lower()
+            for c in candidates:
+                if hint_low == c["serial"].lower() or hint_low == c["node_name"].lower() or hint_low == c["app_name"].lower():
+                    return c["node_name"] or c["serial"]
+                if hint_low in c["node_name"].lower() or hint_low in c["app_name"].lower():
+                    return c["node_name"] or c["serial"]
+        if candidates:
+            return candidates[0]["node_name"] or candidates[0]["serial"]
+    except Exception:
+        pass
+    return ""
+
+raw_target = sys.argv[1].strip() if len(sys.argv) > 1 and sys.argv[1].strip() else "output"
+
+is_sink = False
+target = ""
 
 if raw_target == "output":
-    sink = get_default_sink()
-    target = f"{sink}.monitor" if sink and not sink.endswith(".monitor") else sink
+    is_sink = True
+    target = get_default_sink()
 elif raw_target == "input":
+    is_sink = False
     target = get_default_source()
+elif raw_target == "stream":
+    st = get_active_stream()
+    if st:
+        is_sink = False
+        target = st
+    else:
+        is_sink = True
+        target = get_default_sink()
 else:
-    target = raw_target
-    if not target.endswith(".monitor") and "source" not in target and "input" not in target:
-        # Check if it is a sink
-        try:
-            res = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=1)
-            if target in res.stdout:
-                target = f"{target}.monitor"
-        except Exception:
-            pass
+    sinks = get_all_sinks()
+    cleaned = raw_target[:-8] if raw_target.endswith(".monitor") else raw_target
+    if cleaned in sinks:
+        is_sink = True
+        target = cleaned
+    elif "source" in raw_target.lower() or "input" in raw_target.lower():
+        is_sink = False
+        target = raw_target
+    else:
+        st = get_active_stream(raw_target)
+        if st:
+            is_sink = False
+            target = st
+        else:
+            is_sink = False
+            target = raw_target
 
 cmd = ["pw-record"]
+if is_sink:
+    cmd.extend(["-P", '{"stream.capture.sink":true}'])
 if target:
     cmd.extend(["--target", target])
 cmd.extend(["-a", "--format", "s16", "--rate", "8000", "--channels", "2", "-"])

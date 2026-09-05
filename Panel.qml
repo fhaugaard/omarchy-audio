@@ -71,6 +71,7 @@ Panel {
   property bool expandVisualizer: false
   property string visualizerMode: "bars"
   property string visualizerTarget: "output"
+  property var selectedVisualizerStream: null
   property var soundCards: []
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
@@ -395,6 +396,23 @@ Panel {
     displayAudioSinks = listSnapshot(audioSinks)
     displayAudioSources = listSnapshot(audioSources)
     displayAudioStreams = listSnapshot(audioStreams)
+    if (root.selectedVisualizerStream) {
+      var streamFound = false
+      for (var si = 0; si < displayAudioStreams.length; si++) {
+        if (root.selectedVisualizerStream === displayAudioStreams[si]) {
+          streamFound = true
+          break
+        }
+      }
+      if (!streamFound) {
+        root.selectedVisualizerStream = displayAudioStreams.length > 0 ? displayAudioStreams[0] : null
+      }
+    } else if (displayAudioStreams.length > 0) {
+      root.selectedVisualizerStream = displayAudioStreams[0]
+    }
+    if (root.visualizerTarget === "stream" && displayAudioStreams.length === 0) {
+      root.visualizerTarget = "output"
+    }
     checkSoloIntegrity()
     clampCursor()
   }
@@ -409,6 +427,7 @@ Panel {
     displayAudioSinks = []
     displayAudioSources = []
     displayAudioStreams = []
+    selectedVisualizerStream = null
   }
 
   function resetScroll() {
@@ -701,19 +720,31 @@ Panel {
   property var visualizerBands: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
 
   readonly property string visualizerTargetArg: {
-    if (root.visualizerTarget === "input") return "input"
+    if (root.visualizerTarget === "input") {
+      return (root.source && root.source.name) ? String(root.source.name) : "input"
+    }
     if (root.visualizerTarget === "stream") {
       var s = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
       if (s && s.name) return String(s.name)
-      return "output"
+      return "stream"
     }
-    return "output"
+    return (root.sink && root.sink.name) ? String(root.sink.name) : "output"
   }
 
   Process {
     id: visualizerProc
     running: root.opened && root.expandVisualizer
     command: [root.visBin, root.visualizerTargetArg]
+    onCommandChanged: {
+      root.visualizerPeak = 0.0
+      root.visualizerPeakL = 0.0
+      root.visualizerPeakR = 0.0
+      root.visualizerBands = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+      if (running) {
+        running = false
+        running = true
+      }
+    }
     stdout: SplitParser {
       splitMarker: "\n"
       onRead: function(data) {
@@ -1100,7 +1131,14 @@ Panel {
                     Text {
                       id: streamTargetText
                       anchors.centerIn: parent
-                      text: "Stream"
+                      text: {
+                        if (root.visualizerTarget === "stream") {
+                          var st = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
+                          var lbl = st ? (root.streamLabel(st) || st.name) : ""
+                          if (lbl) return lbl
+                        }
+                        return "Stream"
+                      }
                       color: root.visualizerTarget === "stream" ? root.bar.background : root.bar.foreground
                       font.family: root.bar.fontFamily
                       font.pixelSize: Style.font.caption
@@ -1112,7 +1150,24 @@ Panel {
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.visualizerTarget = "stream"
+                      onClicked: {
+                        if (root.visualizerTarget === "stream" && root.displayAudioStreams.length > 1) {
+                          var curIdx = -1
+                          for (var i = 0; i < root.displayAudioStreams.length; i++) {
+                            if (root.selectedVisualizerStream === root.displayAudioStreams[i]) {
+                              curIdx = i
+                              break
+                            }
+                          }
+                          var nextIdx = (curIdx + 1) % root.displayAudioStreams.length
+                          root.selectedVisualizerStream = root.displayAudioStreams[nextIdx]
+                        } else {
+                          root.visualizerTarget = "stream"
+                          if (!root.selectedVisualizerStream && root.displayAudioStreams.length > 0) {
+                            root.selectedVisualizerStream = root.displayAudioStreams[0]
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -1317,7 +1372,15 @@ Panel {
                   anchors.margins: Style.space(6)
                   textFormat: Text.PlainText
                   text: {
-                    var targetName = root.visualizerTarget === "output" ? (root.sink ? (root.sink.nickname || root.sink.description || root.sink.name) : "Output") : (root.visualizerTarget === "input" ? (root.source ? (root.source.nickname || root.source.description || root.source.name) : "Input") : "Stream")
+                    var targetName = "Output"
+                    if (root.visualizerTarget === "output") {
+                      targetName = root.sink ? (root.sink.nickname || root.sink.description || root.sink.name) : "Output"
+                    } else if (root.visualizerTarget === "input") {
+                      targetName = root.source ? (root.source.nickname || root.source.description || root.source.name) : "Input"
+                    } else if (root.visualizerTarget === "stream") {
+                      var st = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
+                      targetName = st ? (root.streamLabel(st) || st.name) : "Stream"
+                    }
                     return targetName + " · " + Math.round(root.visualizerPeak * 100) + "%"
                   }
                   color: Qt.darker(root.bar.foreground, 1.5)
