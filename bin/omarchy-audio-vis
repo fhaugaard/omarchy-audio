@@ -1,0 +1,131 @@
+#!/usr/bin/env -S python3 -u
+import sys, subprocess, struct, math, time, os, signal, json
+
+def get_default_sink():
+    try:
+        res = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True, timeout=1)
+        return res.stdout.strip() if res.stdout else ""
+    except Exception:
+        return ""
+
+def get_default_source():
+    try:
+        res = subprocess.run(["pactl", "get-default-source"], capture_output=True, text=True, timeout=1)
+        return res.stdout.strip() if res.stdout else ""
+    except Exception:
+        return ""
+
+raw_target = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "output"
+
+if raw_target == "output":
+    sink = get_default_sink()
+    target = f"{sink}.monitor" if sink and not sink.endswith(".monitor") else sink
+elif raw_target == "input":
+    target = get_default_source()
+else:
+    target = raw_target
+    if not target.endswith(".monitor") and "source" not in target and "input" not in target:
+        # Check if it is a sink
+        try:
+            res = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=1)
+            if target in res.stdout:
+                target = f"{target}.monitor"
+        except Exception:
+            pass
+
+cmd = ["pw-record"]
+if target:
+    cmd.extend(["--target", target])
+cmd.extend(["-a", "--format", "s16", "--rate", "8000", "--channels", "2", "-"])
+
+proc = None
+def cleanup(signum, frame):
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, cleanup)
+signal.signal(signal.SIGINT, cleanup)
+
+try:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+except Exception as e:
+    sys.exit(1)
+
+# Precompute DFT tables for 24 frequency bands (60 Hz to 10000 Hz)
+sample_rate = 8000
+N = 256 # 256 samples = 32ms frame (approx 31 FPS)
+freqs = [60 * ((10000 / 60) ** (i / 23)) for i in range(24)]
+tables = []
+for f in freqs:
+    w = 2 * math.pi * f / sample_rate
+    cos_t = [math.cos(w * n) for n in range(N)]
+    sin_t = [math.sin(w * n) for n in range(N)]
+    tables.append((cos_t, sin_t))
+
+bytes_per_frame = N * 2 * 2 # 256 stereo 16-bit frames = 1024 bytes
+
+# Smooth running peak decay
+decay_bands = [0.0] * 24
+
+try:
+    while True:
+        raw = proc.stdout.read(bytes_per_frame)
+        if not raw or len(raw) < bytes_per_frame:
+            break
+        samples = struct.unpack("<%dh" % (len(raw) // 2), raw)
+        
+        # Mono mixed samples for frequency analysis
+        mono = [(samples[i*2] + samples[i*2 + 1]) * 0.5 for i in range(N)]
+        
+        # L/R peak calculation
+        left_samples = samples[0::2]
+        right_samples = samples[1::2]
+        p_l = max(abs(s) for s in left_samples) / 32768.0 if left_samples else 0.0
+        p_r = max(abs(s) for s in right_samples) / 32768.0 if right_samples else 0.0
+        peak = max(p_l, p_r)
+        
+        # Logarithmic dB normalization (-48 dB to -3 dB mapped to 0.0 .. 1.0)
+        def to_db_scale(val):
+            if val < 0.003:
+                return 0.0
+            db = 20 * math.log10(val)
+            return max(0.0, min(1.0, (db + 48.0) / 45.0))
+        
+        vis_peak = round(to_db_scale(peak), 3)
+        vis_l = round(to_db_scale(p_l), 3)
+        vis_r = round(to_db_scale(p_r), 3)
+        
+        # Compute 24 DFT bins
+        bands = []
+        for idx, (cos_t, sin_t) in enumerate(tables):
+            re = sum(s * c for s, c in zip(mono, cos_t))
+            im = sum(s * s_t for s, s_t in zip(mono, sin_t))
+            mag = math.sqrt(re * re + im * im) / N / 32768.0
+            db = 20 * math.log10(max(mag, 0.000001))
+            b_val = max(0.0, min(1.0, (db + 78.0) / 42.0))
+            # Falloff smoothing
+            if b_val > decay_bands[idx]:
+                decay_bands[idx] = b_val
+            else:
+                decay_bands[idx] = max(0.0, decay_bands[idx] * 0.84)
+            bands.append(round(decay_bands[idx], 3))
+        
+        out = json.dumps({"p": vis_peak, "l": vis_l, "r": vis_r, "b": bands})
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, IOError):
+            break
+
+except (BrokenPipeError, KeyboardInterrupt):
+    pass
+finally:
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass

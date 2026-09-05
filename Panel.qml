@@ -15,6 +15,7 @@ Panel {
 
   readonly property string renameBin: Qt.resolvedUrl("bin/omarchy-audio-rename").toString().replace(/^file:\/\//, "")
   readonly property string routingBin: Qt.resolvedUrl("bin/omarchy-audio-routing").toString().replace(/^file:\/\//, "")
+  readonly property string visBin: Qt.resolvedUrl("bin/omarchy-audio-vis").toString().replace(/^file:\/\//, "")
 
   readonly property var sink: Pipewire.defaultAudioSink
   readonly property var source: Pipewire.defaultAudioSource
@@ -70,19 +71,6 @@ Panel {
   property bool expandVisualizer: false
   property string visualizerMode: "bars"
   property string visualizerTarget: "output"
-  property var selectedVisualizerStream: null
-  readonly property var visualizerActiveNode: {
-    if (root.visualizerTarget === "input") {
-      return root.source || Pipewire.defaultAudioSource
-    }
-    if (root.visualizerTarget === "stream") {
-      if (root.selectedVisualizerStream) return root.selectedVisualizerStream
-      if (root.displayAudioStreams && root.displayAudioStreams.length > 0) {
-        return root.displayAudioStreams[0]
-      }
-    }
-    return root.volumeSink || root.sink || Pipewire.defaultAudioSink
-  }
   property var soundCards: []
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
@@ -707,10 +695,40 @@ Panel {
     enabled: root.opened && !!root.source
   }
 
-  PwNodePeakMonitor {
-    id: visualizerMonitor
-    node: root.visualizerActiveNode
-    enabled: root.opened && root.expandVisualizer && !!root.visualizerActiveNode
+  property real visualizerPeak: 0.0
+  property real visualizerPeakL: 0.0
+  property real visualizerPeakR: 0.0
+  property var visualizerBands: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+  readonly property string visualizerTargetArg: {
+    if (root.visualizerTarget === "input") return "input"
+    if (root.visualizerTarget === "stream") {
+      var s = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
+      if (s && s.name) return String(s.name)
+      return "output"
+    }
+    return "output"
+  }
+
+  Process {
+    id: visualizerProc
+    running: root.opened && root.expandVisualizer
+    command: [root.visBin, root.visualizerTargetArg]
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(data) {
+        if (!data || data.length < 5) return
+        try {
+          var d = JSON.parse(data)
+          if (d) {
+            root.visualizerPeak = d.p || 0.0
+            root.visualizerPeakL = d.l || 0.0
+            root.visualizerPeakR = d.r || 0.0
+            if (Array.isArray(d.b)) root.visualizerBands = d.b
+          }
+        } catch (e) {}
+      }
+    }
   }
 
   Process {
@@ -984,7 +1002,7 @@ Panel {
           Item {
             id: visualizerDrawer
             width: parent.width
-            implicitHeight: root.expandVisualizer ? visualizerContent.implicitHeight : 0
+            implicitHeight: root.expandVisualizer ? Style.space(124) : 0
             clip: true
             visible: implicitHeight > 0 || root.expandVisualizer
 
@@ -1191,54 +1209,45 @@ Panel {
                   visible: root.visualizerMode === "bars"
 
                   Repeater {
-                    model: 28
+                    model: 24
                     Rectangle {
                       id: specBarItem
-                      width: (spectrumBarsContainer.width - 27 * Style.space(3)) / 28
+                      width: (spectrumBarsContainer.width - 23 * Style.space(3)) / 24
                       height: spectrumBarsContainer.height
                       color: "transparent"
 
-                      property real currentVal: 0
-                      property real peakCapVal: 0
+                      readonly property real bandVal: (root.visualizerBands && root.visualizerBands.length > index)
+                        ? root.visualizerBands[index]
+                        : 0.0
 
                       // Active bar fill
                       Rectangle {
                         anchors.bottom: parent.bottom
                         width: parent.width
-                        height: Math.max(2, parent.height * specBarItem.currentVal)
+                        height: Math.max(2, parent.height * specBarItem.bandVal)
                         color: Color.accent
                         radius: 1
                         opacity: root.outputMuted ? 0.35 : 0.95
+                        Behavior on height { NumberAnimation { duration: 45 } }
                       }
 
                       // Falling peak cap / gravity needle
                       Rectangle {
+                        property real peakCap: 0.0
+                        Connections {
+                          target: specBarItem
+                          function onBandValChanged() {
+                            if (specBarItem.bandVal > peakCap) peakCap = specBarItem.bandVal
+                            else peakCap = Math.max(0, peakCap - 0.04)
+                          }
+                        }
                         anchors.bottom: parent.bottom
-                        anchors.bottomMargin: Math.max(0, parent.height * specBarItem.peakCapVal - 2)
+                        anchors.bottomMargin: Math.max(0, parent.height * peakCap - 2)
                         width: parent.width
                         height: 2
                         color: root.bar.foreground
                         radius: 1
-                        visible: specBarItem.peakCapVal > 0.03 && !root.outputMuted
-                      }
-
-                      Connections {
-                        target: visualizerMonitor
-                        function onPeakChanged() {
-                          if (!root.expandVisualizer || root.visualizerMode !== "bars") return
-                          var p = visualizerMonitor.peak
-                          var pL = (visualizerMonitor.peaks && visualizerMonitor.peaks.length > 0) ? visualizerMonitor.peaks[0] : p
-                          var pR = (visualizerMonitor.peaks && visualizerMonitor.peaks.length > 1) ? visualizerMonitor.peaks[1] : p
-                          var mid = 14
-                          var chWeight = (index < mid) ? pL : pR
-                          var curve = Math.sin((index + 1) / 28 * Math.PI) * 1.25 + 0.18
-                          var target = Math.min(1.0, chWeight * curve * (0.65 + 0.35 * Math.random()))
-                          if (target > specBarItem.currentVal) specBarItem.currentVal = target
-                          else specBarItem.currentVal = Math.max(0, specBarItem.currentVal * 0.82)
-
-                          if (specBarItem.currentVal > specBarItem.peakCapVal) specBarItem.peakCapVal = specBarItem.currentVal
-                          else specBarItem.peakCapVal = Math.max(0, specBarItem.peakCapVal - 0.035)
-                        }
+                        visible: peakCap > 0.05 && !root.outputMuted
                       }
                     }
                   }
@@ -1252,7 +1261,7 @@ Panel {
                   visible: root.visualizerMode === "wave"
 
                   property var waveHistory: []
-                  readonly property int maxPoints: 50
+                  readonly property int maxPoints: 48
 
                   onPaint: {
                     var ctx = getContext("2d")
@@ -1289,11 +1298,11 @@ Panel {
                   }
 
                   Connections {
-                    target: visualizerMonitor
-                    function onPeakChanged() {
+                    target: root
+                    function onVisualizerPeakChanged() {
                       if (!root.expandVisualizer || root.visualizerMode !== "wave") return
                       var arr = oscilloscopeCanvas.waveHistory.slice()
-                      arr.push(visualizerMonitor.peak)
+                      arr.push(root.visualizerPeak)
                       if (arr.length > oscilloscopeCanvas.maxPoints) arr.shift()
                       oscilloscopeCanvas.waveHistory = arr
                       oscilloscopeCanvas.requestPaint()
@@ -1301,16 +1310,15 @@ Panel {
                   }
                 }
 
-                // Active Node and Peak Readout Caption
+                // Active Target and Peak Readout Caption
                 Text {
                   anchors.bottom: parent.bottom
                   anchors.right: parent.right
                   anchors.margins: Style.space(6)
                   textFormat: Text.PlainText
                   text: {
-                    var nodeName = visualizerMonitor.node ? (visualizerMonitor.node.nickname || visualizerMonitor.node.description || visualizerMonitor.node.name || "Active") : "None"
-                    var peakPct = Math.round(visualizerMonitor.peak * 100) + "%"
-                    return nodeName + " · " + peakPct
+                    var targetName = root.visualizerTarget === "output" ? (root.sink ? (root.sink.nickname || root.sink.description || root.sink.name) : "Output") : (root.visualizerTarget === "input" ? (root.source ? (root.source.nickname || root.source.description || root.source.name) : "Input") : "Stream")
+                    return targetName + " · " + Math.round(root.visualizerPeak * 100) + "%"
                   }
                   color: Qt.darker(root.bar.foreground, 1.5)
                   font.family: root.bar.fontFamily
