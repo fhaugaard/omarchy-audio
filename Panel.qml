@@ -15,6 +15,7 @@ Panel {
 
   readonly property string renameBin: Qt.resolvedUrl("bin/omarchy-audio-rename").toString().replace(/^file:\/\//, "")
   readonly property string routingBin: Qt.resolvedUrl("bin/omarchy-audio-routing").toString().replace(/^file:\/\//, "")
+  readonly property string visBin: Qt.resolvedUrl("bin/omarchy-audio-vis").toString().replace(/^file:\/\//, "")
 
   readonly property var sink: Pipewire.defaultAudioSink
   readonly property var source: Pipewire.defaultAudioSource
@@ -67,6 +68,10 @@ Panel {
   property bool expandOutputLevels: false
   property bool expandInputLevels: false
   property bool expandStreams: false
+  property bool expandVisualizer: false
+  property string visualizerMode: "bars"
+  property string visualizerTarget: "output"
+  property var selectedVisualizerStream: null
   property var soundCards: []
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
@@ -391,6 +396,23 @@ Panel {
     displayAudioSinks = listSnapshot(audioSinks)
     displayAudioSources = listSnapshot(audioSources)
     displayAudioStreams = listSnapshot(audioStreams)
+    if (root.selectedVisualizerStream) {
+      var streamFound = false
+      for (var si = 0; si < displayAudioStreams.length; si++) {
+        if (root.selectedVisualizerStream === displayAudioStreams[si]) {
+          streamFound = true
+          break
+        }
+      }
+      if (!streamFound) {
+        root.selectedVisualizerStream = displayAudioStreams.length > 0 ? displayAudioStreams[0] : null
+      }
+    } else if (displayAudioStreams.length > 0) {
+      root.selectedVisualizerStream = displayAudioStreams[0]
+    }
+    if (root.visualizerTarget === "stream" && displayAudioStreams.length === 0) {
+      root.visualizerTarget = "output"
+    }
     checkSoloIntegrity()
     clampCursor()
   }
@@ -405,6 +427,7 @@ Panel {
     displayAudioSinks = []
     displayAudioSources = []
     displayAudioStreams = []
+    selectedVisualizerStream = null
   }
 
   function resetScroll() {
@@ -691,6 +714,54 @@ Panel {
     enabled: root.opened && !!root.source
   }
 
+  property real visualizerPeak: 0.0
+  property real visualizerPeakL: 0.0
+  property real visualizerPeakR: 0.0
+  property var visualizerBands: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+  readonly property string visualizerTargetArg: {
+    if (root.visualizerTarget === "input") {
+      return (root.source && root.source.name) ? String(root.source.name) : "input"
+    }
+    if (root.visualizerTarget === "stream") {
+      var s = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
+      if (s && s.name) return String(s.name)
+      return "stream"
+    }
+    return (root.sink && root.sink.name) ? String(root.sink.name) : "output"
+  }
+
+  Process {
+    id: visualizerProc
+    running: root.opened && root.expandVisualizer
+    command: [root.visBin, root.visualizerTargetArg]
+    onCommandChanged: {
+      root.visualizerPeak = 0.0
+      root.visualizerPeakL = 0.0
+      root.visualizerPeakR = 0.0
+      root.visualizerBands = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+      if (running) {
+        running = false
+        running = true
+      }
+    }
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(data) {
+        if (!data || data.length < 5) return
+        try {
+          var d = JSON.parse(data)
+          if (d) {
+            root.visualizerPeak = d.p || 0.0
+            root.visualizerPeakL = d.l || 0.0
+            root.visualizerPeakR = d.r || 0.0
+            if (Array.isArray(d.b)) root.visualizerBands = d.b
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
   Process {
     id: sinkAvailabilityProc
     command: ["omarchy-audio-sink-availability"]
@@ -805,7 +876,9 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "m" || t === "M") {
+        if (t === "v" || t === "V") {
+          root.expandVisualizer = !root.expandVisualizer
+        } else if (t === "m" || t === "M") {
           if (!root.cursorActive) return
           if (root.focusSection === "streams" && root.selectedIndex >= 0
               && root.selectedIndex < root.displayAudioStreams.length) {
@@ -847,7 +920,7 @@ Panel {
           Item {
             id: heroItem
             width: parent.width
-            implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, powerSwitch.implicitHeight)
+            implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroActions.implicitHeight)
 
             Text {
               id: heroIcon
@@ -861,20 +934,61 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
 
-            ToggleSwitch {
-              id: powerSwitch
-              checked: root.anyAudible
-              hasCursor: root.headerHasCursor
-              foreground: root.bar.foreground
+            Row {
+              id: heroActions
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              onHovered: function(on) { if (on) root.setHeaderCursor() }
-              onToggled: root.toggleAllMuted()
+              spacing: Style.space(8)
 
-              PanelToolTip {
-                visible: powerSwitch.containsMouse
-                text: root.toggleHint
-                fontFamily: root.bar.fontFamily
+              // Visualizer drawer toggle button
+              Rectangle {
+                id: visualizerToggleBtn
+                width: Style.space(26)
+                height: Style.space(26)
+                radius: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                color: root.expandVisualizer ? Util.alpha(Color.accent, 0.2) : (visualizerToggleMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.1) : "transparent")
+                border.color: root.expandVisualizer ? Color.accent : (visualizerToggleMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.25) : "transparent")
+                border.width: 1
+
+                Text {
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: root.expandVisualizer ? "󰐍" : "󰕓"
+                  color: root.expandVisualizer ? Color.accent : (visualizerToggleMouse.containsMouse ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4))
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.title
+                }
+
+                MouseArea {
+                  id: visualizerToggleMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.expandVisualizer = !root.expandVisualizer
+                }
+
+                PanelToolTip {
+                  visible: visualizerToggleMouse.containsMouse
+                  text: root.expandVisualizer ? "Hide Audio Visualizer (v)" : "Show Audio Visualizer (v)"
+                  fontFamily: root.bar.fontFamily
+                }
+              }
+
+              ToggleSwitch {
+                id: powerSwitch
+                checked: root.anyAudible
+                hasCursor: root.headerHasCursor
+                foreground: root.bar.foreground
+                anchors.verticalCenter: parent.verticalCenter
+                onHovered: function(on) { if (on) root.setHeaderCursor() }
+                onToggled: root.toggleAllMuted()
+
+                PanelToolTip {
+                  visible: powerSwitch.containsMouse
+                  text: root.toggleHint
+                  fontFamily: root.bar.fontFamily
+                }
               }
             }
 
@@ -882,8 +996,8 @@ Panel {
               id: heroLabels
               anchors.left: heroIcon.right
               anchors.leftMargin: Style.space(14)
-              anchors.right: parent.right
-              anchors.rightMargin: powerSwitch.width + Style.space(12)
+              anchors.right: heroActions.left
+              anchors.rightMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
 
@@ -911,6 +1025,373 @@ Panel {
                 font.letterSpacing: 1.2
                 elide: Text.ElideRight
                 width: parent.width
+              }
+            }
+          }
+
+          // ---- Audio Visualizer Drawer (Issue #4) ----
+          Item {
+            id: visualizerDrawer
+            width: parent.width
+            implicitHeight: root.expandVisualizer ? Style.space(124) : 0
+            clip: true
+            visible: implicitHeight > 0 || root.expandVisualizer
+
+            Behavior on implicitHeight {
+              NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+            }
+
+            Column {
+              id: visualizerContent
+              width: parent.width
+              spacing: Style.space(8)
+              opacity: root.expandVisualizer ? 1.0 : 0.0
+              Behavior on opacity {
+                NumberAnimation { duration: 150 }
+              }
+
+              // Visualizer Toolbar: Target Selector & Mode Switcher
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(targetPillsRow.implicitHeight, modePillsRow.implicitHeight)
+
+                // Target Selector Pills (Left aligned)
+                Row {
+                  id: targetPillsRow
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(6)
+
+                  // Output Target
+                  Rectangle {
+                    implicitWidth: outputTargetText.implicitWidth + Style.space(14)
+                    implicitHeight: Style.space(20)
+                    radius: Style.space(4)
+                    color: root.visualizerTarget === "output" ? Color.accent : (outputTargetMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.06))
+                    border.color: root.visualizerTarget === "output" ? Color.accent : Util.alpha(root.bar.foreground, 0.15)
+                    border.width: 1
+
+                    Text {
+                      id: outputTargetText
+                      anchors.centerIn: parent
+                      text: "Output"
+                      color: root.visualizerTarget === "output" ? root.bar.background : root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+
+                    MouseArea {
+                      id: outputTargetMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.visualizerTarget = "output"
+                    }
+                  }
+
+                  // Input Target
+                  Rectangle {
+                    implicitWidth: inputTargetText.implicitWidth + Style.space(14)
+                    implicitHeight: Style.space(20)
+                    radius: Style.space(4)
+                    color: root.visualizerTarget === "input" ? Color.accent : (inputTargetMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.06))
+                    border.color: root.visualizerTarget === "input" ? Color.accent : Util.alpha(root.bar.foreground, 0.15)
+                    border.width: 1
+
+                    Text {
+                      id: inputTargetText
+                      anchors.centerIn: parent
+                      text: "Input"
+                      color: root.visualizerTarget === "input" ? root.bar.background : root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+
+                    MouseArea {
+                      id: inputTargetMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.visualizerTarget = "input"
+                    }
+                  }
+
+                  // Stream Target (when active streams exist)
+                  Rectangle {
+                    visible: root.displayAudioStreams.length > 0
+                    implicitWidth: streamTargetText.implicitWidth + Style.space(14)
+                    implicitHeight: Style.space(20)
+                    radius: Style.space(4)
+                    color: root.visualizerTarget === "stream" ? Color.accent : (streamTargetMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.06))
+                    border.color: root.visualizerTarget === "stream" ? Color.accent : Util.alpha(root.bar.foreground, 0.15)
+                    border.width: 1
+
+                    Text {
+                      id: streamTargetText
+                      anchors.centerIn: parent
+                      text: {
+                        if (root.visualizerTarget === "stream") {
+                          var st = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
+                          var lbl = st ? (root.streamLabel(st) || st.name) : ""
+                          if (lbl) return lbl
+                        }
+                        return "Stream"
+                      }
+                      color: root.visualizerTarget === "stream" ? root.bar.background : root.bar.foreground
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+
+                    MouseArea {
+                      id: streamTargetMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        if (root.visualizerTarget === "stream" && root.displayAudioStreams.length > 1) {
+                          var curIdx = -1
+                          for (var i = 0; i < root.displayAudioStreams.length; i++) {
+                            if (root.selectedVisualizerStream === root.displayAudioStreams[i]) {
+                              curIdx = i
+                              break
+                            }
+                          }
+                          var nextIdx = (curIdx + 1) % root.displayAudioStreams.length
+                          root.selectedVisualizerStream = root.displayAudioStreams[nextIdx]
+                        } else {
+                          root.visualizerTarget = "stream"
+                          if (!root.selectedVisualizerStream && root.displayAudioStreams.length > 0) {
+                            root.selectedVisualizerStream = root.displayAudioStreams[0]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                // Mode Selector Pills (Right aligned)
+                Row {
+                  id: modePillsRow
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(6)
+
+                  // Bars Mode
+                  Rectangle {
+                    implicitWidth: barsModeText.implicitWidth + Style.space(12)
+                    implicitHeight: Style.space(20)
+                    radius: Style.space(4)
+                    color: root.visualizerMode === "bars" ? Util.alpha(Color.accent, 0.25) : (barsModeMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.1) : "transparent")
+                    border.color: root.visualizerMode === "bars" ? Color.accent : Util.alpha(root.bar.foreground, 0.15)
+                    border.width: 1
+
+                    Text {
+                      id: barsModeText
+                      anchors.centerIn: parent
+                      text: "󰐍 Bars"
+                      color: root.visualizerMode === "bars" ? Color.accent : Qt.darker(root.bar.foreground, 1.3)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+
+                    MouseArea {
+                      id: barsModeMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.visualizerMode = "bars"
+                    }
+                  }
+
+                  // Waveform Mode
+                  Rectangle {
+                    implicitWidth: waveModeText.implicitWidth + Style.space(12)
+                    implicitHeight: Style.space(20)
+                    radius: Style.space(4)
+                    color: root.visualizerMode === "wave" ? Util.alpha(Color.accent, 0.25) : (waveModeMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.1) : "transparent")
+                    border.color: root.visualizerMode === "wave" ? Color.accent : Util.alpha(root.bar.foreground, 0.15)
+                    border.width: 1
+
+                    Text {
+                      id: waveModeText
+                      anchors.centerIn: parent
+                      text: "󰕓 Wave"
+                      color: root.visualizerMode === "wave" ? Color.accent : Qt.darker(root.bar.foreground, 1.3)
+                      font.family: root.bar.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+
+                    MouseArea {
+                      id: waveModeMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.visualizerMode = "wave"
+                    }
+                  }
+                }
+              }
+
+              // Visualizer Screen Card
+              Rectangle {
+                width: parent.width
+                height: Style.space(88)
+                radius: Style.space(8)
+                color: Util.alpha(root.bar.foreground, 0.04)
+                border.color: Util.alpha(root.bar.foreground, 0.12)
+                border.width: 1
+                clip: true
+
+                // Center guide line
+                Rectangle {
+                  anchors.centerIn: parent
+                  width: parent.width
+                  height: 1
+                  color: Util.alpha(root.bar.foreground, 0.08)
+                }
+
+                // 1. Multi-band Spectrum Bars View
+                Row {
+                  id: spectrumBarsContainer
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(3)
+                  visible: root.visualizerMode === "bars"
+
+                  Repeater {
+                    model: 24
+                    Rectangle {
+                      id: specBarItem
+                      width: (spectrumBarsContainer.width - 23 * Style.space(3)) / 24
+                      height: spectrumBarsContainer.height
+                      color: "transparent"
+
+                      readonly property real bandVal: (root.visualizerBands && root.visualizerBands.length > index)
+                        ? root.visualizerBands[index]
+                        : 0.0
+
+                      // Active bar fill
+                      Rectangle {
+                        anchors.bottom: parent.bottom
+                        width: parent.width
+                        height: Math.max(2, parent.height * specBarItem.bandVal)
+                        color: Color.accent
+                        radius: 1
+                        opacity: root.outputMuted ? 0.35 : 0.95
+                        Behavior on height { NumberAnimation { duration: 45 } }
+                      }
+
+                      // Falling peak cap / gravity needle
+                      Rectangle {
+                        property real peakCap: 0.0
+                        Connections {
+                          target: specBarItem
+                          function onBandValChanged() {
+                            if (specBarItem.bandVal > peakCap) peakCap = specBarItem.bandVal
+                            else peakCap = Math.max(0, peakCap - 0.04)
+                          }
+                        }
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: Math.max(0, parent.height * peakCap - 2)
+                        width: parent.width
+                        height: 2
+                        color: root.bar.foreground
+                        radius: 1
+                        visible: peakCap > 0.05 && !root.outputMuted
+                      }
+                    }
+                  }
+                }
+
+                // 2. Oscilloscope Wave View
+                Canvas {
+                  id: oscilloscopeCanvas
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  visible: root.visualizerMode === "wave"
+
+                  property var waveHistory: []
+                  readonly property int maxPoints: 48
+
+                  onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.clearRect(0, 0, width, height)
+                    if (waveHistory.length < 2) return
+
+                    var w = width
+                    var h = height
+                    var midY = h / 2
+                    var step = w / (maxPoints - 1)
+
+                    // Top wave
+                    ctx.strokeStyle = String(Color.accent)
+                    ctx.lineWidth = 2
+                    ctx.beginPath()
+                    for (var i = 0; i < waveHistory.length; i++) {
+                      var x = i * step
+                      var y = midY - (waveHistory[i] * (midY - 4))
+                      if (i === 0) ctx.moveTo(x, y)
+                      else ctx.lineTo(x, y)
+                    }
+                    ctx.stroke()
+
+                    // Mirrored bottom wave
+                    ctx.strokeStyle = Util.alpha(Color.accent, 0.4)
+                    ctx.beginPath()
+                    for (var j = 0; j < waveHistory.length; j++) {
+                      var xj = j * step
+                      var yj = midY + (waveHistory[j] * (midY - 4))
+                      if (j === 0) ctx.moveTo(xj, yj)
+                      else ctx.lineTo(xj, yj)
+                    }
+                    ctx.stroke()
+                  }
+
+                  Connections {
+                    target: root
+                    function onVisualizerPeakChanged() {
+                      if (!root.expandVisualizer || root.visualizerMode !== "wave") return
+                      var arr = oscilloscopeCanvas.waveHistory.slice()
+                      arr.push(root.visualizerPeak)
+                      if (arr.length > oscilloscopeCanvas.maxPoints) arr.shift()
+                      oscilloscopeCanvas.waveHistory = arr
+                      oscilloscopeCanvas.requestPaint()
+                    }
+                  }
+                }
+
+                // Active Target and Peak Readout Caption
+                Text {
+                  anchors.bottom: parent.bottom
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(6)
+                  textFormat: Text.PlainText
+                  text: {
+                    var targetName = "Output"
+                    if (root.visualizerTarget === "output") {
+                      targetName = root.sink ? (root.sink.nickname || root.sink.description || root.sink.name) : "Output"
+                    } else if (root.visualizerTarget === "input") {
+                      targetName = root.source ? (root.source.nickname || root.source.description || root.source.name) : "Input"
+                    } else if (root.visualizerTarget === "stream") {
+                      var st = root.selectedVisualizerStream || (root.displayAudioStreams.length > 0 ? root.displayAudioStreams[0] : null)
+                      targetName = st ? (root.streamLabel(st) || st.name) : "Stream"
+                    }
+                    return targetName + " · " + Math.round(root.visualizerPeak * 100) + "%"
+                  }
+                  color: Qt.darker(root.bar.foreground, 1.5)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  elide: Text.ElideLeft
+                  maximumLineCount: 1
+                  width: Math.min(implicitWidth, parent.width * 0.6)
+                  horizontalAlignment: Text.AlignRight
+                }
               }
             }
           }

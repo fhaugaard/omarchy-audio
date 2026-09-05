@@ -1,0 +1,201 @@
+#!/usr/bin/env -S python3 -u
+import sys, subprocess, struct, math, time, os, signal, json
+
+def get_default_sink():
+    try:
+        res = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True, timeout=1)
+        s = res.stdout.strip() if res.stdout else ""
+        if s.endswith(".monitor"):
+            s = s[:-8]
+        return s
+    except Exception:
+        return ""
+
+def get_default_source():
+    try:
+        res = subprocess.run(["pactl", "get-default-source"], capture_output=True, text=True, timeout=1)
+        return res.stdout.strip() if res.stdout else ""
+    except Exception:
+        return ""
+
+def get_all_sinks():
+    try:
+        res = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=1)
+        sinks = []
+        for line in res.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                s = parts[1]
+                if s.endswith(".monitor"):
+                    s = s[:-8]
+                sinks.append(s)
+        return sinks
+    except Exception:
+        return []
+
+def get_active_stream(hint=""):
+    try:
+        res = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, timeout=1)
+        blocks = res.stdout.split("Sink Input #")
+        candidates = []
+        for b in blocks[1:]:
+            lines = b.splitlines()
+            serial = lines[0].strip()
+            props = {}
+            for line in lines[1:]:
+                line = line.strip()
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    props[k.strip()] = v.strip().strip('"')
+            node_name = props.get("node.name", "")
+            app_name = props.get("application.name", "")
+            candidates.append({"serial": serial, "node_name": node_name, "app_name": app_name})
+        
+        if hint and hint != "stream":
+            hint_low = hint.lower()
+            for c in candidates:
+                if hint_low == c["serial"].lower() or hint_low == c["node_name"].lower() or hint_low == c["app_name"].lower():
+                    return c["node_name"] or c["serial"]
+                if hint_low in c["node_name"].lower() or hint_low in c["app_name"].lower():
+                    return c["node_name"] or c["serial"]
+        if candidates:
+            return candidates[0]["node_name"] or candidates[0]["serial"]
+    except Exception:
+        pass
+    return ""
+
+raw_target = sys.argv[1].strip() if len(sys.argv) > 1 and sys.argv[1].strip() else "output"
+
+is_sink = False
+target = ""
+
+if raw_target == "output":
+    is_sink = True
+    target = get_default_sink()
+elif raw_target == "input":
+    is_sink = False
+    target = get_default_source()
+elif raw_target == "stream":
+    st = get_active_stream()
+    if st:
+        is_sink = False
+        target = st
+    else:
+        is_sink = True
+        target = get_default_sink()
+else:
+    sinks = get_all_sinks()
+    cleaned = raw_target[:-8] if raw_target.endswith(".monitor") else raw_target
+    if cleaned in sinks:
+        is_sink = True
+        target = cleaned
+    elif "source" in raw_target.lower() or "input" in raw_target.lower():
+        is_sink = False
+        target = raw_target
+    else:
+        st = get_active_stream(raw_target)
+        if st:
+            is_sink = False
+            target = st
+        else:
+            is_sink = False
+            target = raw_target
+
+cmd = ["pw-record"]
+if is_sink:
+    cmd.extend(["-P", '{"stream.capture.sink":true}'])
+if target:
+    cmd.extend(["--target", target])
+cmd.extend(["-a", "--format", "s16", "--rate", "8000", "--channels", "2", "-"])
+
+proc = None
+def cleanup(signum, frame):
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, cleanup)
+signal.signal(signal.SIGINT, cleanup)
+
+try:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+except Exception as e:
+    sys.exit(1)
+
+# Precompute DFT tables for 24 frequency bands (60 Hz to 10000 Hz)
+sample_rate = 8000
+N = 256 # 256 samples = 32ms frame (approx 31 FPS)
+freqs = [60 * ((10000 / 60) ** (i / 23)) for i in range(24)]
+tables = []
+for f in freqs:
+    w = 2 * math.pi * f / sample_rate
+    cos_t = [math.cos(w * n) for n in range(N)]
+    sin_t = [math.sin(w * n) for n in range(N)]
+    tables.append((cos_t, sin_t))
+
+bytes_per_frame = N * 2 * 2 # 256 stereo 16-bit frames = 1024 bytes
+
+# Smooth running peak decay
+decay_bands = [0.0] * 24
+
+try:
+    while True:
+        raw = proc.stdout.read(bytes_per_frame)
+        if not raw or len(raw) < bytes_per_frame:
+            break
+        samples = struct.unpack("<%dh" % (len(raw) // 2), raw)
+        
+        # Mono mixed samples for frequency analysis
+        mono = [(samples[i*2] + samples[i*2 + 1]) * 0.5 for i in range(N)]
+        
+        # L/R peak calculation
+        left_samples = samples[0::2]
+        right_samples = samples[1::2]
+        p_l = max(abs(s) for s in left_samples) / 32768.0 if left_samples else 0.0
+        p_r = max(abs(s) for s in right_samples) / 32768.0 if right_samples else 0.0
+        peak = max(p_l, p_r)
+        
+        # Logarithmic dB normalization (-48 dB to -3 dB mapped to 0.0 .. 1.0)
+        def to_db_scale(val):
+            if val < 0.003:
+                return 0.0
+            db = 20 * math.log10(val)
+            return max(0.0, min(1.0, (db + 48.0) / 45.0))
+        
+        vis_peak = round(to_db_scale(peak), 3)
+        vis_l = round(to_db_scale(p_l), 3)
+        vis_r = round(to_db_scale(p_r), 3)
+        
+        # Compute 24 DFT bins
+        bands = []
+        for idx, (cos_t, sin_t) in enumerate(tables):
+            re = sum(s * c for s, c in zip(mono, cos_t))
+            im = sum(s * s_t for s, s_t in zip(mono, sin_t))
+            mag = math.sqrt(re * re + im * im) / N / 32768.0
+            db = 20 * math.log10(max(mag, 0.000001))
+            b_val = max(0.0, min(1.0, (db + 78.0) / 42.0))
+            # Falloff smoothing
+            if b_val > decay_bands[idx]:
+                decay_bands[idx] = b_val
+            else:
+                decay_bands[idx] = max(0.0, decay_bands[idx] * 0.84)
+            bands.append(round(decay_bands[idx], 3))
+        
+        out = json.dumps({"p": vis_peak, "l": vis_l, "r": vis_r, "b": bands})
+        try:
+            sys.stdout.write(out + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, IOError):
+            break
+
+except (BrokenPipeError, KeyboardInterrupt):
+    pass
+finally:
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
