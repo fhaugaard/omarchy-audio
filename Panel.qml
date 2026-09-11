@@ -68,8 +68,19 @@ Panel {
   property bool expandInputLevels: false
   property bool expandStreams: false
   property var soundCards: []
+  property var multiOutputTargets: []
+  property string originalSingleOutputSink: ""
+  // Backward compatibility alias for multiOutputTargets
+  readonly property var simultaneousSlaves: multiOutputTargets
+  property double lastSimultaneousUserAction: 0
+  property double lastMasterVolumeUserAction: 0
+  property real multiOutputMasterVolume: 1.0
+  property bool multiOutputMasterMuted: false
+  property bool expandMultiOutput: false
+  readonly property bool showMultiOutputChips: root.expandMultiOutput || root.isSimultaneousActive
   readonly property bool isSimultaneousActive: {
     if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") !== -1) return true
+    if (root.multiOutputTargets && root.multiOutputTargets.length >= 2) return true
     for (var i = 0; i < root.soundCards.length; i++) {
       if (root.soundCards[i] && root.soundCards[i].isSimultaneous) return true
     }
@@ -205,14 +216,32 @@ Panel {
     return sink
   }
 
-  onSinkChanged: resolveVolumeSink()
+  onSinkChanged: {
+    resolveVolumeSink()
+    if (sink && !root.isSimultaneousActive) {
+      var sName = String(sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
+  }
 
   function resolveVolumeSink() {
     if (!volumeSinkProc.running) volumeSinkProc.running = true
   }
 
-  readonly property real outputVolume: volumeSink && volumeSink.audio ? volumeSink.audio.volume : 0
-  readonly property bool outputMuted: volumeSink && volumeSink.audio ? volumeSink.audio.muted : false
+  readonly property real outputVolume: {
+    if (root.isSimultaneousActive) {
+      return root.multiOutputMasterVolume
+    }
+    return volumeSink && volumeSink.audio ? volumeSink.audio.volume : (sink && sink.audio ? sink.audio.volume : 0)
+  }
+  readonly property bool outputMuted: {
+    if (root.isSimultaneousActive) {
+      return root.multiOutputMasterMuted
+    }
+    return volumeSink && volumeSink.audio ? volumeSink.audio.muted : (sink && sink.audio ? sink.audio.muted : false)
+  }
   readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
   readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
 
@@ -224,7 +253,7 @@ Panel {
   property bool cursorActive: false
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
-  readonly property bool hasOutput: !!(volumeSink && volumeSink.audio)
+  readonly property bool hasOutput: root.isSimultaneousActive ? true : !!(volumeSink && volumeSink.audio)
   readonly property bool hasInput: !!(source && source.audio)
   readonly property bool anyAudible: (hasOutput && !outputMuted) || (hasInput && !inputMuted)
   readonly property string toggleHint: anyAudible ? "Mute" : "Unmute"
@@ -236,6 +265,10 @@ Panel {
     ? Style.selectedFillFor(bar.foreground, Color.accent)
     : "transparent"
 
+  // Note: For the "output" section, keyboard cursor navigation (j/k) moves directly between
+  // the master slider (selectedIndex = -1) and the individual SinkRows (0..displayAudioSinks.length - 1).
+  // The Multi-Output chips are cleanly bypassed when collapsed (root.expandMultiOutput == false)
+  // as well as when expanded, preventing focus traps during linear vertical traversal.
   function sectionCount(section) {
     if (section === "output") return displayAudioSinks.length
     if (section === "input") return displayAudioSources.length
@@ -251,7 +284,7 @@ Panel {
   }
 
   function sectionHasSlider(section) {
-    if (section === "output") return !root.isSimultaneousActive
+    if (section === "output") return true
     if (section === "input") return !!source
     return false
   }
@@ -485,9 +518,21 @@ Panel {
   }
 
   function setOutputVolume(v) {
-    if (!volumeSink || !volumeSink.audio) return outputVolume
     var volume = Math.max(0, Math.min(1, v))
-    volumeSink.audio.volume = volume
+    if (root.isSimultaneousActive) {
+      root.lastMasterVolumeUserAction = Date.now()
+      root.multiOutputMasterVolume = volume
+      Quickshell.execDetached(["pactl", "set-sink-volume", "omarchy_combined", Math.round(volume * 100) + "%"])
+      return volume
+    }
+    if (volumeSink && volumeSink.audio) {
+      volumeSink.audio.volume = volume
+      return volume
+    }
+    if (sink && sink.audio) {
+      sink.audio.volume = volume
+      return volume
+    }
     return volume
   }
 
@@ -505,7 +550,15 @@ Panel {
   }
 
   function toggleOutputMute() {
+    if (root.isSimultaneousActive) {
+      root.lastMasterVolumeUserAction = Date.now()
+      var nextMute = !root.multiOutputMasterMuted
+      root.multiOutputMasterMuted = nextMute
+      Quickshell.execDetached(["pactl", "set-sink-mute", "omarchy_combined", nextMute ? "1" : "0"])
+      return
+    }
     if (volumeSink && volumeSink.audio) volumeSink.audio.muted = !volumeSink.audio.muted
+    else if (sink && sink.audio) sink.audio.muted = !sink.audio.muted
   }
 
   function toggleInputMute() {
@@ -522,8 +575,14 @@ Panel {
     if (!node) return
     var sinkName = String(node.name || "")
     var sinkId = String(node.id !== undefined ? node.id : "")
+    if (!root.isSimultaneousActive && sinkName && sinkName.indexOf("omarchy_combined") === -1) {
+      root.originalSingleOutputSink = sinkName
+    }
     if (root.isSimultaneousActive) {
-      Quickshell.execDetached([root.routingBin, "toggle-simultaneous", sinkName])
+      root.multiOutputTargets = [sinkName]
+      Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", sinkName])
+    } else {
+      root.multiOutputTargets = [sinkName]
     }
     Pipewire.preferredDefaultAudioSink = node
     if (node.audio) node.audio.muted = false
@@ -650,10 +709,56 @@ Panel {
   }
 
   function toggleSimultaneous() {
+    if (!root.isSimultaneousActive && root.sink) {
+      var sName = String(root.sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
     Quickshell.execDetached([root.routingBin, "toggle-simultaneous"])
     Qt.callLater(function() {
       refreshRoutingState()
       scheduleDisplayAudioModelRefresh()
+    })
+  }
+
+  function toggleSimultaneousSink(sinkNode) {
+    if (!sinkNode) return
+    root.lastSimultaneousUserAction = Date.now()
+    root.expandMultiOutput = true
+    var name = String(sinkNode.name || "")
+    
+    if (!root.isSimultaneousActive && root.sink) {
+      var sName = String(root.sink.name || "")
+      if (sName && sName.indexOf("omarchy_combined") === -1) {
+        root.originalSingleOutputSink = sName
+      }
+    }
+
+    var current = []
+    if (root.isSimultaneousActive) {
+      current = (root.multiOutputTargets || []).slice()
+    } else {
+      var defaultName = (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) ? String(root.sink.name || "") : ""
+      if (defaultName) current = [defaultName]
+      else if (root.multiOutputTargets && root.multiOutputTargets.length > 0) current = root.multiOutputTargets.slice()
+    }
+
+    var idx = current.indexOf(name)
+    if (idx >= 0) {
+      if (current.length <= 1) {
+        return
+      }
+      current.splice(idx, 1)
+    } else {
+      current.push(name)
+    }
+
+    root.multiOutputTargets = current
+    var args = [root.routingBin, "set-simultaneous-sinks"].concat(current)
+    Quickshell.execDetached(args)
+    Qt.callLater(function() {
+      if (!streamLinksProc.running) streamLinksProc.running = true
     })
   }
 
@@ -714,7 +819,50 @@ Panel {
     command: [root.routingBin, "list-cards"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.soundCards = Model.parseCardProfiles(text)
+      onStreamFinished: {
+        root.soundCards = Model.parseCardProfiles(text)
+        for (var c = 0; c < root.soundCards.length; c++) {
+          if (root.soundCards[c] && root.soundCards[c].originalSink) {
+            if (!root.originalSingleOutputSink || !root.isSimultaneousActive) {
+              root.originalSingleOutputSink = root.soundCards[c].originalSink
+            }
+            break
+          }
+        }
+        if (Date.now() - root.lastSimultaneousUserAction > 1500) {
+          var targets = []
+          for (var i = 0; i < root.soundCards.length; i++) {
+            if (root.soundCards[i] && Array.isArray(root.soundCards[i].multiOutputTargets) && root.soundCards[i].multiOutputTargets.length > 0) {
+              targets = root.soundCards[i].multiOutputTargets
+              break
+            } else if (root.soundCards[i] && Array.isArray(root.soundCards[i].simultaneousSlaves) && root.soundCards[i].simultaneousSlaves.length > 0) {
+              targets = root.soundCards[i].simultaneousSlaves
+              break
+            }
+          }
+          if (targets.length > 0) {
+            root.multiOutputTargets = targets
+          } else if (root.sink && String(root.sink.name || "").indexOf("omarchy_combined") < 0) {
+            root.multiOutputTargets = [String(root.sink.name)]
+            if (!root.originalSingleOutputSink) {
+              root.originalSingleOutputSink = String(root.sink.name)
+            }
+          }
+        }
+        if (Date.now() - root.lastMasterVolumeUserAction > 1500) {
+          for (var j = 0; j < root.soundCards.length; j++) {
+            if (root.soundCards[j] && root.soundCards[j].isSimultaneous) {
+              if (root.soundCards[j].combinedVolume !== undefined) {
+                root.multiOutputMasterVolume = root.soundCards[j].combinedVolume
+              }
+              if (root.soundCards[j].combinedMuted !== undefined) {
+                root.multiOutputMasterMuted = root.soundCards[j].combinedMuted
+              }
+              break
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1189,7 +1337,6 @@ Panel {
 
                 Text {
                   id: outputPercent
-                  visible: !root.isSimultaneousActive
                   textFormat: Text.PlainText
                   text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
                   color: Qt.darker(root.bar.foreground, 1.4)
@@ -1202,51 +1349,265 @@ Panel {
               }
             }
 
-            // Simultaneous Playback across all devices
-            Rectangle {
+            // Custom Simultaneous Multi-Output Selector
+            Column {
               visible: root.displayAudioSinks.length > 1
               width: parent.width
-              height: Style.space(24)
-              radius: Math.min(4, Style.cornerRadius)
-              readonly property bool isSimultaneous: root.isSimultaneousActive
-              color: isSimultaneous ? Util.alpha(Color.accent, 0.25) : (simulMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.12) : Util.alpha(root.bar.foreground, 0.05))
-              border.color: isSimultaneous ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
-              border.width: 1
+              spacing: Style.space(4)
 
-              Row {
-                anchors.centerIn: parent
-                spacing: Style.space(6)
+              Rectangle {
+                width: parent.width
+                implicitHeight: simulCol.implicitHeight + Style.space(12)
+                radius: Math.min(6, Style.cornerRadius)
+                color: root.isSimultaneousActive
+                  ? Util.alpha(Color.accent, 0.12)
+                  : Util.alpha(root.bar.foreground, 0.04)
+                border.color: root.isSimultaneousActive
+                  ? Color.accent
+                  : Util.alpha(root.bar.foreground, 0.15)
+                border.width: 1
 
-                Text {
-                  text: parent.parent.isSimultaneous ? "󰄬" : "󰓃"
-                  color: parent.parent.isSimultaneous ? Color.accent : root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
+                Column {
+                  id: simulCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                }
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(6)
 
-                Text {
-                  text: parent.parent.isSimultaneous ? "Simultaneous Playback Active (All Devices)" : "Play on All Outputs Simultaneously"
-                  color: parent.parent.isSimultaneous ? Color.accent : root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-              }
+                    Item {
+                    width: parent.width
+                    implicitHeight: Math.max(simulTitleRow.implicitHeight, clearSimulBtn.implicitHeight)
 
-              MouseArea {
-                id: simulMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.toggleSimultaneous()
+                    Row {
+                      id: simulTitleRow
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(6)
+
+                      Text {
+                        text: root.isSimultaneousActive ? "󰄬" : "󰓃"
+                        color: root.isSimultaneousActive ? Color.accent : root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+
+                      Text {
+                        text: root.isSimultaneousActive
+                          ? ("Multi-Output Active (" + root.multiOutputTargets.length + " outputs)")
+                          : "Multi-Output"
+                        color: root.isSimultaneousActive ? Color.accent : root.bar.foreground
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+                    }
+
+                    MouseArea {
+                      anchors.fill: simulTitleRow
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.expandMultiOutput = !root.expandMultiOutput
+                    }
+
+                    Row {
+                      id: clearSimulBtn
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(8)
+
+                      Text {
+                        visible: root.isSimultaneousActive
+                        text: "Single output"
+                        color: clearSimulMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                          id: clearSimulMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            var target = ""
+                            // 1. Prioritize original output active before multi-select was entered
+                            if (root.originalSingleOutputSink) {
+                              for (var s = 0; s < root.displayAudioSinks.length; s++) {
+                                if (root.displayAudioSinks[s] && String(root.displayAudioSinks[s].name || "") === root.originalSingleOutputSink) {
+                                  target = root.originalSingleOutputSink
+                                  break
+                                }
+                              }
+                            }
+                            // 2. Fallback to first member of current multi-output group
+                            if (!target && root.multiOutputTargets && root.multiOutputTargets.length > 0) {
+                              for (var m = 0; m < root.multiOutputTargets.length; m++) {
+                                var candidate = root.multiOutputTargets[m]
+                                for (var s2 = 0; s2 < root.displayAudioSinks.length; s2++) {
+                                  if (root.displayAudioSinks[s2] && String(root.displayAudioSinks[s2].name || "") === candidate) {
+                                    target = candidate
+                                    break
+                                  }
+                                }
+                                if (target) break
+                              }
+                            }
+                            // 3. Fallback to first display audio sink
+                            if (!target && root.displayAudioSinks.length > 0) {
+                              target = String(root.displayAudioSinks[0].name || "")
+                            }
+                            if (!target) return
+
+                            root.multiOutputTargets = [target]
+                            var targetNode = null
+                            for (var k = 0; k < root.displayAudioSinks.length; k++) {
+                              if (root.displayAudioSinks[k] && String(root.displayAudioSinks[k].name || "") === target) {
+                                targetNode = root.displayAudioSinks[k]
+                                break
+                              }
+                            }
+                            if (targetNode) {
+                              Pipewire.preferredDefaultAudioSink = targetNode
+                              if (targetNode.audio) targetNode.audio.muted = false
+                            }
+
+                            Quickshell.execDetached([root.routingBin, "set-simultaneous-sinks", target])
+                            Qt.callLater(function() {
+                              refreshRoutingState()
+                              scheduleDisplayAudioModelRefresh()
+                            })
+                          }
+                        }
+                      }
+
+                      Text {
+                        visible: !root.isSimultaneousActive && root.showMultiOutputChips
+                        text: "Select all"
+                        color: allSimulMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                          id: allSimulMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.toggleSimultaneous()
+                        }
+                      }
+
+                      Text {
+                        text: root.showMultiOutputChips ? "󰅀 Hide" : "󰅂 Show"
+                        color: toggleMultiMouse.containsMouse ? Color.accent : Qt.darker(root.bar.foreground, 1.4)
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                          id: toggleMultiMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.expandMultiOutput = !root.expandMultiOutput
+                        }
+                      }
+                    }
+                  }
+
+                  Flow {
+                    visible: root.showMultiOutputChips
+                    width: parent.width
+                    spacing: Style.space(4)
+
+                    Repeater {
+                      model: root.displayAudioSinks
+
+                      Rectangle {
+                        id: simulChip
+                        required property var modelData
+                        readonly property bool isSelected: {
+                          if (root.isSimultaneousActive) {
+                            return Model.isSinkInSimultaneous(simulChip.modelData, root.multiOutputTargets)
+                          } else {
+                            if (root.multiOutputTargets && root.multiOutputTargets.length > 0 && Model.isSinkInSimultaneous(simulChip.modelData, root.multiOutputTargets)) {
+                              return true
+                            }
+                            return !!(root.sink && simulChip.modelData && (root.sink.id === simulChip.modelData.id || root.sink.name === simulChip.modelData.name))
+                          }
+                        }
+                        width: simulChipContent.implicitWidth + Style.space(12)
+                        height: Style.space(22)
+                        radius: Math.min(4, Style.cornerRadius)
+                        color: isSelected
+                          ? Util.alpha(Color.accent, 0.3)
+                          : (chipMouse.containsMouse ? Util.alpha(root.bar.foreground, 0.14) : Util.alpha(root.bar.foreground, 0.06))
+                        border.color: isSelected ? Color.accent : Util.alpha(root.bar.foreground, 0.2)
+                        border.width: 1
+
+                        Row {
+                          id: simulChipContent
+                          anchors.centerIn: parent
+                          spacing: Style.space(4)
+
+                          Text {
+                            text: root.sinkGlyph(simulChip.modelData)
+                            color: simulChip.isSelected ? Color.accent : root.bar.foreground
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+
+                          Text {
+                            text: root.nodeLabel(simulChip.modelData)
+                            color: simulChip.isSelected ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.2)
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            font.bold: simulChip.isSelected
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+
+                          Text {
+                            text: simulChip.isSelected ? "󰄬" : "+"
+                            color: simulChip.isSelected ? Color.accent : Qt.darker(root.bar.foreground, 1.5)
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+                        }
+
+                        MouseArea {
+                          id: chipMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: function(mouse) {
+                            mouse.accepted = true
+                            root.toggleSimultaneousSink(simulChip.modelData)
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
 
             CursorSurface {
               id: outputSliderRow
-              visible: !root.isSimultaneousActive
               width: parent.width
               height: outputSlider.implicitHeight + Style.spacing.controlGap
               hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === -1
@@ -1265,7 +1626,7 @@ Panel {
                 step: 0.05
                 value: root.outputVolume
                 opacity: root.outputMuted ? 0.5 : 1.0
-                enabled: !!root.sink
+                enabled: root.isSimultaneousActive || !!root.sink
 
                 onMoved: function(v) { root.setOutputVolume(v) }
                 onRightClicked: root.toggleOutputMute()
@@ -1438,10 +1799,13 @@ Panel {
     property bool isEditing: false
     property string editBuffer: ""
 
-    readonly property bool isActive: !root.isSimultaneousActive && root.sink && node && root.sink.id === node.id
+    readonly property bool isMultiOutputTarget: root.isSimultaneousActive && Model.isSinkInSimultaneous(node, root.multiOutputTargets)
+    // Backward compatibility alias for isMultiOutputTarget
+    readonly property bool isSimultaneousSlave: isMultiOutputTarget
+    readonly property bool isActive: (!root.isSimultaneousActive && root.sink && node && root.sink.id === node.id) || isMultiOutputTarget
     readonly property real sinkVolume: node && node.audio ? node.audio.volume : 0
     readonly property bool sinkMuted: node && node.audio ? node.audio.muted : false
-    readonly property bool showSlider: root.expandOutputLevels || root.isSimultaneousActive
+    readonly property bool showSlider: (root.expandOutputLevels && !isActive) || isMultiOutputTarget
 
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
